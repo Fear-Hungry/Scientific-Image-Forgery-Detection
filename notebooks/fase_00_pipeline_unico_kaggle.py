@@ -594,7 +594,15 @@ def predict_prob_forged(image: np.ndarray) -> float:
 
 def predict_seg_ensemble_prob(image: np.ndarray) -> np.ndarray:
     if not SEG_MODELS:
-        raise RuntimeError("Nenhum modelo de segmentação carregado.")
+        msg = (
+            "Nenhum modelo de segmentação carregado.\n"
+            f"- MODELS_SEG_DIR={MODELS_SEG_DIR}\n"
+            "- Esperado: `outputs/models_seg/<model_id>/fold_*/best.pt` (no Kaggle: /kaggle/working/outputs/...)\n"
+            "- Soluções:\n"
+            "  1) Rode treino aqui: defina `RUN_TRAIN_SEG=True` e execute as células de treino.\n"
+            "  2) Anexe um Dataset com checkpoints em `outputs/models_seg/...` e rode novamente.\n"
+        )
+        raise RuntimeError(msg)
     probs_sum: np.ndarray | None = None
     count = 0
     modes = TTA_MODES if USE_TTA else ("none",)
@@ -620,6 +628,12 @@ def predict_instances(image: np.ndarray) -> list[np.ndarray]:
 
 
 if RUN_SUBMISSION:
+    if not SEG_MODELS:
+        raise RuntimeError(
+            "RUN_SUBMISSION=True, mas nenhum modelo de segmentação foi carregado.\n"
+            f"- MODELS_SEG_DIR={MODELS_SEG_DIR}\n"
+            "Treine (RUN_TRAIN_SEG=True) ou anexe um Dataset com `outputs/models_seg/<model_id>/fold_*/best.pt`."
+        )
     SUBMISSION_PATH = Path("/kaggle/working/submission.csv") if is_kaggle() else (output_root() / "submission.csv")
     SUBMISSION_PATH.parent.mkdir(parents=True, exist_ok=True)
 
@@ -640,4 +654,3 @@ if RUN_SUBMISSION:
     print("wrote:", SUBMISSION_PATH)
 else:
     print("[SUBMISSION] RUN_SUBMISSION=False; não gerou CSV.")
-

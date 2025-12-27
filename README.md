@@ -11,6 +11,7 @@ Repositório com um *snapshot* dos dados da competição do Kaggle **“Recod.ai
 - [Cronograma e premiação](#cronograma-e-premiação)
 - [O desafio](#o-desafio)
 - [Dados (estrutura e formatos)](#dados-estrutura-e-formatos)
+- [Notebooks (Kaggle)](#notebooks-kaggle)
 - [Formato de submissão](#formato-de-submissão)
 - [Run-Length Encoding (RLE)](#run-length-encoding-rle)
 - [Métrica: variante de F1 (oF1)](#métrica-variante-de-f1-of1)
@@ -102,6 +103,21 @@ data/
   - `H, W` batem com a imagem correspondente em `train_images/forged/<case_id>.png`.
 
 > Observação: as máscaras são fornecidas para **todas** as imagens em `train_images/forged/`. Para imagens em `train_images/authentic/`, o rótulo é “sem forjamento” (submissão deve ser `authentic`).
+
+## Notebooks (Kaggle)
+
+Notebooks prontos para uso no Kaggle (internet OFF no submit). Todos importam o código do projeto em `src/forgeryseg/`.
+
+- `notebooks/fase_00_pipeline_unico_kaggle.ipynb`: **tudo-em-um** (setup → treino opcional → inferência → `submission.csv`).
+- `notebooks/fase_01_setup_offline_kaggle.ipynb`: valida instalação offline via `recodai_bundle/wheels/*.whl`.
+- `notebooks/fase_03_treino_segmentacao_kaggle.ipynb`: treino do segmentador (salva em `outputs/models_seg/<model_id>/fold_<k>/best.pt`).
+- `notebooks/fase_04_inferencia_submissao_kaggle.ipynb`: inferência/submissão (requer checkpoints em `outputs/models_seg/...`; pode anexar via Kaggle Dataset).
+
+Fluxo típico (Kaggle):
+
+1) Anexe o dataset da competição (`recodai-luc-scientific-image-forgery-detection`).
+2) (Opcional) Importe este repositório como Kaggle Dataset (via GitHub) para ter `recodai_bundle/wheels/` e `src/` disponíveis offline.
+3) Se treinar, os checkpoints ficam em `/kaggle/working/outputs/...`. Para reutilizar, use “Save & Create Dataset” a partir do notebook e anexe o dataset de outputs depois.
 
 ## Formato de submissão
 

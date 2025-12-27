@@ -250,10 +250,125 @@ print("DATA_ROOT:", DATA_ROOT)
 print("train samples:", len(train_samples), "auth:", int((train_labels == 0).sum()), "forged:", int((train_labels == 1).sum()))
 print("test samples:", len(test_samples))
 
+# %% [markdown]
+# ## Análise dos Dados e Pré-processamento
+#
+# Antes de treinar modelos, fazemos uma exploração rápida do dataset:
+#
+# - Cada imagem tem um identificador único (`case_id` = nome do arquivo).
+# - No treino, existem dois grupos: **authentic** e **forged**.
+# - Para imagens **forged**, há uma máscara em `train_masks/<case_id>.npy` indicando pixels duplicados
+#   (pode vir como máscara binária 2D ou como múltiplas instâncias 3D).
+# - Para segmentação, montamos pares (**imagem**, **máscara-union**). Para imagens autênticas, a máscara é toda zero.
+# - Para classificação, usamos rótulo binário: `0=authentic`, `1=forged`.
+#
+# ### Dimensionamento e formato
+#
+# - As imagens têm tamanhos variados e podem ser coloridas ou em escala de cinza. Padronizamos a leitura para **3 canais RGB**
+#   (via `PIL.Image.convert("RGB")`, usado em `forgeryseg.dataset.load_image`).
+# - Para segmentação, em vez de redimensionar agressivamente a imagem inteira, trabalhamos com **patches de tamanho fixo**
+#   (`SEG_PATCH_SIZE=512`) usando **padding + crop** durante o treino. Isso preserva detalhes finos de falsificações pequenas.
+# - Em inferência, usamos **tiling** (`TILE_SIZE`/`OVERLAP`) para lidar com imagens grandes sem perder resolução.
+#
+# ---
+
+# %%
+# Fase 1 — Célula 3b: Stats rápidos (tamanho / canais / máscaras)
+from collections import Counter
+
+RUN_DATA_ANALYSIS = True
+ANALYSIS_MAX_ITEMS = 200
+
+
+def quick_dataset_stats(samples, *, max_items: int = 200, seed: int = 42, name: str = "train") -> None:
+    """
+    Análise leve e offline-friendly:
+    - tamanhos (HxW) via PIL (sem carregar arrays grandes)
+    - modos/canais originais (L/RGB/RGBA/...)
+    - checagem de shape das máscaras `.npy` quando existirem
+    """
+    if not samples:
+        print(f"[{name}] vazio.")
+        return
+
+    rng = np.random.default_rng(int(seed))
+    idxs = np.arange(len(samples), dtype=np.int64)
+    if len(idxs) > int(max_items):
+        idxs = rng.choice(idxs, size=int(max_items), replace=False)
+
+    modes: Counter[str] = Counter()
+    heights: list[int] = []
+    widths: list[int] = []
+    mask_present = 0
+    mask_shape_mismatch = 0
+    mask_positive_frac: list[float] = []
+
+    from PIL import Image
+
+    for i in idxs.tolist():
+        s = samples[int(i)]
+        try:
+            with Image.open(s.image_path) as img:
+                modes[str(img.mode)] += 1
+                w, h = img.size
+            heights.append(int(h))
+            widths.append(int(w))
+
+            if s.mask_path is not None and Path(s.mask_path).exists():
+                mask_present += 1
+                masks = np.load(s.mask_path, mmap_mode="r")
+                union = masks if masks.ndim == 2 else masks.max(axis=0)
+                if union.shape != (h, w):
+                    mask_shape_mismatch += 1
+                pos = int((union > 0).sum())
+                mask_positive_frac.append(pos / float(union.shape[0] * union.shape[1]))
+        except Exception:
+            print(f"[{name}] erro ao ler:", s.image_path)
+            traceback.print_exc()
+
+    n = len(idxs)
+    h_min, h_max = (min(heights), max(heights)) if heights else (None, None)
+    w_min, w_max = (min(widths), max(widths)) if widths else (None, None)
+    print(f"[{name}] amostra: {n}/{len(samples)}")
+    print(f"[{name}] modos (originais):", dict(modes))
+    print(f"[{name}] H: min={h_min} max={h_max} | W: min={w_min} max={w_max}")
+    if mask_present:
+        frac_mean = float(np.mean(mask_positive_frac)) if mask_positive_frac else 0.0
+        frac_p95 = float(np.percentile(mask_positive_frac, 95)) if len(mask_positive_frac) >= 2 else frac_mean
+        print(f"[{name}] máscaras presentes (na amostra): {mask_present} | shape mismatch: {mask_shape_mismatch}")
+        print(f"[{name}] fração positiva (union): mean={frac_mean:.6f} p95={frac_p95:.6f}")
+
+
+if RUN_DATA_ANALYSIS:
+    quick_dataset_stats(train_samples, max_items=ANALYSIS_MAX_ITEMS, seed=SEED, name="train")
+    quick_dataset_stats(test_samples, max_items=ANALYSIS_MAX_ITEMS, seed=SEED, name="test")
+else:
+    print("[DATA] RUN_DATA_ANALYSIS=False (pulando).")
+
 # %%
 # Fase 1 — Célula 4: Config global (liga/desliga)
+def _has_any_ckpt(dir_name: str, pattern: str) -> bool:
+    # Procura primeiro em /kaggle/input (datasets anexados), depois em outputs/ local.
+    if is_kaggle():
+        ki = Path("/kaggle/input")
+        if ki.exists():
+            for ds in sorted(ki.glob("*")):
+                for base in (ds, ds / "recodai_bundle"):
+                    cand = base / "outputs" / dir_name
+                    if cand.exists():
+                        if any(cand.glob(pattern)):
+                            return True
+    local = (Path("/kaggle/working") if is_kaggle() else Path(".").resolve()) / "outputs" / dir_name
+    return local.exists() and any(local.glob(pattern))
+
+
+HAS_SEG_CKPT = _has_any_ckpt("models_seg", "*/*/best.pt")
+HAS_CLS_CKPT = _has_any_ckpt("models_cls", "fold_*/best.pt")
+
+# Defaults "rodáveis": se não há checkpoints, treinamos segmentação para conseguir gerar a submissão.
+# (Você pode sobrescrever manualmente aqui.)
 RUN_TRAIN_CLS = False
-RUN_TRAIN_SEG = False
+RUN_TRAIN_SEG = not HAS_SEG_CKPT
 RUN_SUBMISSION = True
 
 N_FOLDS = 5
@@ -262,6 +377,8 @@ FOLD = 0
 print("RUN_TRAIN_CLS:", RUN_TRAIN_CLS)
 print("RUN_TRAIN_SEG:", RUN_TRAIN_SEG)
 print("RUN_SUBMISSION:", RUN_SUBMISSION)
+print("HAS_SEG_CKPT:", HAS_SEG_CKPT)
+print("HAS_CLS_CKPT:", HAS_CLS_CKPT)
 
 # %%
 # Fase 2 — Célula 5: Split (folds)
@@ -427,13 +544,14 @@ else:
 
 # %%
 # Fase 3 — Célula 7: Treino de segmentação (opcional)
-SEG_MODEL_ID = "unetpp_effb7"
-SEG_ENCODER = "efficientnet-b7"
-SEG_PATCH_SIZE = 512
+SEG_MODEL_ID = "unetpp_effb4"
+SEG_ENCODER = "efficientnet-b4"
+SEG_PATCH_SIZE = 384
 SEG_BATCH_SIZE = 8
-SEG_EPOCHS = 15
+SEG_EPOCHS = 8
 SEG_LR = 1e-3
 SEG_WEIGHT_DECAY = 1e-2
+SEG_PATIENCE = 3
 
 if RUN_TRAIN_SEG:
     train_aug = get_train_augment(patch_size=SEG_PATCH_SIZE, copy_move_prob=0.20)
@@ -459,12 +577,14 @@ if RUN_TRAIN_SEG:
 
     use_amp = (DEVICE == "cuda")
     best_dice = -1.0
+    best_epoch = 0
     for epoch in range(1, int(SEG_EPOCHS) + 1):
         tr = train_one_epoch(seg_model, dl_seg_train, seg_criterion, seg_optimizer, DEVICE, use_amp=use_amp, progress=True, desc="seg train")
         val_stats, val_dice = validate(seg_model, dl_seg_val, seg_criterion, DEVICE, progress=True, desc="seg val")
         print(f"[SEG] epoch {epoch:02d}/{SEG_EPOCHS} | train_loss={tr.loss:.4f} | val_loss={val_stats.loss:.4f} | dice@0.5={val_dice:.4f}")
         if float(val_dice) > best_dice:
             best_dice = float(val_dice)
+            best_epoch = int(epoch)
             ckpt = {
                 "model_state": seg_model.state_dict(),
                 "config": {"backend": "smp", "arch": "unetplusplus", "encoder_name": SEG_ENCODER, "encoder_weights": None, "classes": 1, "model_id": SEG_MODEL_ID, "patch_size": int(SEG_PATCH_SIZE), "fold": int(FOLD), "seed": int(SEED)},
@@ -472,6 +592,9 @@ if RUN_TRAIN_SEG:
             }
             torch.save(ckpt, seg_best_path)
             print("[SEG] saved best ->", seg_best_path)
+        if SEG_PATIENCE and best_epoch and (int(epoch) - int(best_epoch) >= int(SEG_PATIENCE)):
+            print(f"[SEG] early stopping: sem melhora por {SEG_PATIENCE} épocas (best_epoch={best_epoch}).")
+            break
 
     print("[SEG] done. best dice:", best_dice)
 else:

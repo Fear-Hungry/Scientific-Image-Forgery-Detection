@@ -10,6 +10,17 @@ class TrainStats:
     loss: float
 
 
+def _maybe_tqdm(iterable, enabled: bool, desc: str):
+    if not enabled:
+        return iterable
+    try:  # pragma: no cover - optional dependency
+        from tqdm.auto import tqdm
+
+        return tqdm(iterable, desc=desc, leave=False)
+    except Exception:
+        return iterable
+
+
 @torch.no_grad()
 def _batch_dice(logits: torch.Tensor, targets: torch.Tensor, threshold: float = 0.5) -> torch.Tensor:
     probs = torch.sigmoid(logits)
@@ -22,12 +33,21 @@ def _batch_dice(logits: torch.Tensor, targets: torch.Tensor, threshold: float = 
     return dice.mean()
 
 
-def train_one_epoch(model, loader, criterion, optimizer, device, use_amp: bool = False) -> TrainStats:
+def train_one_epoch(
+    model,
+    loader,
+    criterion,
+    optimizer,
+    device,
+    use_amp: bool = False,
+    progress: bool = True,
+    desc: str = "train",
+) -> TrainStats:
     model.train()
     total_loss = 0.0
     scaler = torch.cuda.amp.GradScaler(enabled=use_amp)
 
-    for images, masks in loader:
+    for images, masks in _maybe_tqdm(loader, progress, desc):
         images = images.to(device)
         masks = masks.to(device)
         optimizer.zero_grad(set_to_none=True)
@@ -42,12 +62,19 @@ def train_one_epoch(model, loader, criterion, optimizer, device, use_amp: bool =
     return TrainStats(loss=total_loss / max(len(loader.dataset), 1))
 
 
-def validate(model, loader, criterion, device) -> tuple[TrainStats, float]:
+def validate(
+    model,
+    loader,
+    criterion,
+    device,
+    progress: bool = True,
+    desc: str = "val",
+) -> tuple[TrainStats, float]:
     model.eval()
     total_loss = 0.0
     dice_scores = []
     with torch.no_grad():
-        for images, masks in loader:
+        for images, masks in _maybe_tqdm(loader, progress, desc):
             images = images.to(device)
             masks = masks.to(device)
             logits = model(images)

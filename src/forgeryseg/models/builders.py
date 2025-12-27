@@ -84,3 +84,58 @@ def build_segformer(
         **kwargs,
     )
 
+
+def build_unetplusplus(
+    encoder_name: str = "efficientnet-b7",
+    encoder_weights: str | None = "imagenet",
+    encoder_depth: int = 5,
+    decoder_channels: Sequence[int] = (256, 128, 64, 32, 16),
+    decoder_attention_type: str | None = "scse",
+    in_channels: int = 3,
+    classes: int = 1,
+    strict_weights: bool = False,
+    **kwargs: Any,
+):
+    if smp is None:
+        raise ImportError("segmentation_models_pytorch is required for Unet++ models")
+    return _safe_init(
+        smp.UnetPlusPlus,
+        encoder_name=encoder_name,
+        encoder_depth=encoder_depth,
+        decoder_channels=decoder_channels,
+        decoder_attention_type=decoder_attention_type,
+        in_channels=in_channels,
+        classes=classes,
+        activation=None,
+        strict_weights=strict_weights,
+        encoder_weights=encoder_weights,
+        **kwargs,
+    )
+
+
+def build_deeplabv3plus(
+    encoder_name: str = "resnet101",
+    encoder_weights: str | None = "imagenet",
+    encoder_depth: int = 5,
+    decoder_channels: int = 256,
+    atrous_rates: Sequence[int] = (12, 24, 36),
+    in_channels: int = 3,
+    classes: int = 1,
+    strict_weights: bool = False,
+    **kwargs: Any,
+):
+    if smp is None:
+        raise ImportError("segmentation_models_pytorch is required for DeepLabV3+ models")
+    return _safe_init(
+        smp.DeepLabV3Plus,
+        encoder_name=encoder_name,
+        encoder_depth=encoder_depth,
+        decoder_channels=decoder_channels,
+        atrous_rates=atrous_rates,
+        in_channels=in_channels,
+        classes=classes,
+        activation=None,
+        strict_weights=strict_weights,
+        encoder_weights=encoder_weights,
+        **kwargs,
+    )

@@ -220,6 +220,20 @@ print("- Se faltar `timm` / `segmentation_models_pytorch`, anexe um Dataset com 
 print("- Se uma lib for puro-Python e não tiver wheel, você pode vendorizá-la em um Dataset GitHub e usar `add_local_package_to_syspath()`.")
 
 # %%
+# Célula 3b — Import do projeto (src/forgeryseg)
+try:
+    import forgeryseg  # type: ignore
+except Exception:
+    local_src = Path("src").resolve()
+    if (local_src / "forgeryseg" / "__init__.py").exists() and str(local_src) not in sys.path:
+        sys.path.insert(0, str(local_src))
+    if is_kaggle():
+        add_local_package_to_syspath("forgeryseg")
+    import forgeryseg  # type: ignore
+
+print("forgeryseg:", Path(forgeryseg.__file__).resolve())
+
+# %%
 # Célula 4 — Detectar dataset (Kaggle/local) e imprimir contagens
 
 

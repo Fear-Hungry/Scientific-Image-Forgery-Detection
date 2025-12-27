@@ -2,6 +2,7 @@
 
 __all__ = [
     "augment",
+    "checkpoints",
     "constants",
     "dataset",
     "inference",

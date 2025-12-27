@@ -106,12 +106,9 @@ data/
 
 ## Notebooks (Kaggle)
 
-Notebooks prontos para uso no Kaggle (internet OFF no submit). Todos importam o código do projeto em `src/forgeryseg/`.
+Notebook pronto para uso no Kaggle (internet OFF no submit). Importa o código do projeto em `src/forgeryseg/`.
 
 - `notebooks/fase_00_pipeline_unico_kaggle.ipynb`: **tudo-em-um** (setup → treino opcional → inferência → `submission.csv`).
-- `notebooks/fase_01_setup_offline_kaggle.ipynb`: valida instalação offline via `recodai_bundle/wheels/*.whl`.
-- `notebooks/fase_03_treino_segmentacao_kaggle.ipynb`: treino do segmentador (salva em `outputs/models_seg/<model_id>/fold_<k>/best.pt`).
-- `notebooks/fase_04_inferencia_submissao_kaggle.ipynb`: inferência/submissão (requer checkpoints em `outputs/models_seg/...`; pode anexar via Kaggle Dataset).
 
 Fluxo típico (Kaggle):
 

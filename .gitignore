@@ -1,0 +1,19 @@
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.ipynb_checkpoints/
+.venv/
+.env
+.envrc
+build/
+dist/
+*.egg-info/
+outputs/
+runs/
+logs/
+
+# Local datasets
+/data/**
+!data/README.md
+!data/.gitkeep

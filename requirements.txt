@@ -1,0 +1,11 @@
+numpy
+pillow
+scipy
+scikit-learn
+albumentations
+opencv-python
+torch
+torchvision
+timm
+segmentation-models-pytorch
+pytest

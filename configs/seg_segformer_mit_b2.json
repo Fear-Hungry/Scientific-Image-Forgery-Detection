@@ -1,0 +1,31 @@
+{
+  "model_id": "segformer_mit_b2",
+  "arch": "segformer",
+  "encoder_name": "mit_b2",
+  "encoder_weights": "imagenet",
+  "patch_size": 512,
+  "batch_size": 8,
+  "epochs": 15,
+  "learning_rate": 0.0001,
+  "weight_decay": 0.0001,
+  "loss": "bce_tversky",
+  "tversky_alpha": 0.7,
+  "tversky_beta": 0.3,
+  "tversky_weight": 1.0,
+  "positive_prob": 0.7,
+  "min_pos_pixels": 32,
+  "max_tries": 10,
+  "pos_sample_weight": 2.0,
+  "num_workers": 4,
+  "use_amp": true,
+  "copy_move_prob": 0.25,
+  "copy_move_min_area_frac": 0.05,
+  "copy_move_max_area_frac": 0.2,
+  "copy_move_rotation_limit": 15.0,
+  "copy_move_scale_range": [
+    0.9,
+    1.1
+  ],
+  "seed": 42,
+  "folds": 3
+}

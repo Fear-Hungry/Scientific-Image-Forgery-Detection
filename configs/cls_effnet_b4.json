@@ -1,0 +1,18 @@
+{
+  "model_id": "cls_effnet_b4",
+  "backend": "timm",
+  "model_name": "tf_efficientnet_b4_ns",
+  "image_size": 384,
+  "batch_size": 32,
+  "epochs": 10,
+  "patience": 3,
+  "learning_rate": 0.0003,
+  "weight_decay": 0.01,
+  "num_workers": 2,
+  "use_amp": true,
+  "pretrained": true,
+  "strict_pretrained": false,
+  "seed": 42,
+  "folds": 5
+}
+

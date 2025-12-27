@@ -111,9 +111,10 @@ else:
             "--no-index",
             "--find-links",
             str(wheel_dir),
+            "--no-deps",
             *whls,
         ]
-        print("[OFFLINE INSTALL] executando:", " ".join(cmd[:8]), "...", f"(+{len(whls)} wheels)")
+        print("[OFFLINE INSTALL] executando:", " ".join(cmd[:9]), "...", f"(+{len(whls)} wheels)")
         subprocess.check_call(cmd)
         print("[OFFLINE INSTALL] OK.")
 
@@ -255,4 +256,3 @@ print("train_images/authentic:", len(list((TRAIN_IMAGES / "authentic").glob("*.p
 print("train_images/forged:", len(list((TRAIN_IMAGES / "forged").glob("*.png"))))
 print("train_masks:", len(list(TRAIN_MASKS.glob("*.npy"))))
 print("test_images:", len(list(TEST_IMAGES.glob('*.png'))))
-

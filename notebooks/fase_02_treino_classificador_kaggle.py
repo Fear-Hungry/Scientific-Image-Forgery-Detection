@@ -103,9 +103,10 @@ else:
             "--no-index",
             "--find-links",
             str(wheel_dir),
+            "--no-deps",
             *whls,
         ]
-        print("[OFFLINE INSTALL] executando:", " ".join(cmd[:8]), "...", f"(+{len(whls)} wheels)")
+        print("[OFFLINE INSTALL] executando:", " ".join(cmd[:9]), "...", f"(+{len(whls)} wheels)")
         subprocess.check_call(cmd)
         print("[OFFLINE INSTALL] OK.")
     else:
@@ -549,4 +550,3 @@ for t in THRESHOLDS:
 if best is not None:
     print("\nSugestão (max recall, desempate por menor precision):")
     print("recall=", best[0], "precision=-", -best[1], "threshold=", best[2])
-

@@ -106,9 +106,10 @@ else:
             "--no-index",
             "--find-links",
             str(wheel_dir),
+            "--no-deps",
             *whls,
         ]
-        print("[OFFLINE INSTALL] executando:", " ".join(cmd[:8]), "...", f"(+{len(whls)} wheels)")
+        print("[OFFLINE INSTALL] executando:", " ".join(cmd[:9]), "...", f"(+{len(whls)} wheels)")
         subprocess.check_call(cmd)
         print("[OFFLINE INSTALL] OK.")
     else:
@@ -694,4 +695,3 @@ with SUBMISSION_PATH.open("w", newline="") as f:
         writer.writerow({"case_id": s.case_id, "annotation": encode_instances(inst)})
 
 print("wrote:", SUBMISSION_PATH)
-

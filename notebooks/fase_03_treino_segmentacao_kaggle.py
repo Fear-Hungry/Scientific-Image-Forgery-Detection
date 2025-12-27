@@ -103,9 +103,10 @@ else:
             "--no-index",
             "--find-links",
             str(wheel_dir),
+            "--no-deps",
             *whls,
         ]
-        print("[OFFLINE INSTALL] executando:", " ".join(cmd[:8]), "...", f"(+{len(whls)} wheels)")
+        print("[OFFLINE INSTALL] executando:", " ".join(cmd[:9]), "...", f"(+{len(whls)} wheels)")
         subprocess.check_call(cmd)
         print("[OFFLINE INSTALL] OK.")
     else:
@@ -584,4 +585,3 @@ for epoch in range(1, int(EPOCHS) + 1):
 
 print("best dice:", best_dice)
 print("saved dir:", SAVE_DIR)
-

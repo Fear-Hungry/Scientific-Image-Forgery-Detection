@@ -24,7 +24,7 @@ from forgeryseg.checkpoints import build_classifier_from_config, build_segmentat
 from forgeryseg.constants import AUTHENTIC_LABEL
 from forgeryseg.dataset import build_test_index, load_image
 from forgeryseg.inference import normalize_image, predict_image
-from forgeryseg.postprocess import binarize, extract_components
+from forgeryseg.postprocess import prob_to_instances
 from forgeryseg.rle import encode_instances
 
 
@@ -251,6 +251,10 @@ def main() -> None:
     parser.add_argument("--max-size", type=int, default=0, help="Optional resize long side")
     parser.add_argument("--threshold", type=float, default=0.5, help="Binarization threshold")
     parser.add_argument("--min-area", type=int, default=32, help="Minimum component area")
+    parser.add_argument("--closing", type=int, default=0, help="Morphological closing kernel size (0=disabled)")
+    parser.add_argument("--closing-iters", type=int, default=1, help="Morphological closing iterations")
+    parser.add_argument("--fill-holes", action="store_true", help="Fill holes in binary mask")
+    parser.add_argument("--median", type=int, default=0, help="Median smoothing kernel size (0=disabled, odd>=3)")
     parser.add_argument("--cls-skip-threshold", type=float, default=0.10, help="Skip seg when p_forged < this")
     parser.add_argument("--device", default="", help="Device override")
     parser.add_argument("--limit", type=int, default=0, help="Limit number of test samples (debug)")
@@ -306,6 +310,10 @@ def main() -> None:
     max_size = int(cfg.get("max_size", args.max_size))
     threshold = float(cfg.get("threshold", args.threshold))
     min_area = int(cfg.get("min_area", args.min_area))
+    closing = int(cfg.get("closing", args.closing))
+    closing_iters = int(cfg.get("closing_iters", args.closing_iters))
+    fill_holes = bool(cfg.get("fill_holes", args.fill_holes))
+    median = int(cfg.get("median", args.median))
     cls_skip_threshold = float(cfg.get("cls_skip_threshold", args.cls_skip_threshold))
     top_k_per_model = int(cfg.get("top_k_per_model", args.top_k_per_model))
 
@@ -343,8 +351,15 @@ def main() -> None:
                 max_size=max_size,
                 tta_modes=tta_modes,
             )
-            bin_mask = binarize(prob, threshold=threshold)
-            instances = extract_components(bin_mask, min_area=min_area)
+            instances = prob_to_instances(
+                prob,
+                threshold=threshold,
+                min_area=min_area,
+                closing_ksize=closing,
+                closing_iters=closing_iters,
+                fill_holes_enabled=fill_holes,
+                median_ksize=median,
+            )
             annotation = encode_instances(instances)
             writer.writerow({"case_id": s.case_id, "annotation": annotation})
 

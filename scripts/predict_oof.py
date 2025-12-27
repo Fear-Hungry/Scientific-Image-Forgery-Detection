@@ -19,7 +19,7 @@ from forgeryseg.dataset import build_train_index, load_image, load_mask_instance
 from forgeryseg.inference import predict_image
 from forgeryseg.metric import score_image
 from forgeryseg.models.fpn_convnext import build_model
-from forgeryseg.postprocess import extract_components
+from forgeryseg.postprocess import prob_to_instances
 
 
 def _iter_stratified_folds(y: List[int], n_splits: int, seed: int) -> Iterable[Tuple[np.ndarray, np.ndarray]]:
@@ -84,6 +84,10 @@ def main() -> None:
     parser.add_argument("--encoder-weights", default="", help="Override encoder weights")
     parser.add_argument("--threshold", type=float, default=0.5, help="Binarization threshold")
     parser.add_argument("--min-area", type=int, default=0, help="Minimum component area")
+    parser.add_argument("--closing", type=int, default=0, help="Morphological closing kernel size (0=disabled)")
+    parser.add_argument("--closing-iters", type=int, default=1, help="Morphological closing iterations")
+    parser.add_argument("--fill-holes", action="store_true", help="Fill holes in binary mask")
+    parser.add_argument("--median", type=int, default=0, help="Median smoothing kernel size (0=disabled, odd>=3)")
     parser.add_argument("--tile-size", type=int, default=0, help="Tile size for inference")
     parser.add_argument("--overlap", type=int, default=0, help="Tile overlap")
     parser.add_argument("--max-size", type=int, default=0, help="Resize long side to this")
@@ -132,8 +136,15 @@ def main() -> None:
             np.save(pred_path, pred)
 
             gt_instances = load_mask_instances(sample.mask_path) if sample.mask_path else []
-            bin_mask = (pred >= args.threshold).astype(np.uint8)
-            pred_instances = extract_components(bin_mask, min_area=args.min_area)
+            pred_instances = prob_to_instances(
+                pred,
+                threshold=args.threshold,
+                min_area=args.min_area,
+                closing_ksize=args.closing,
+                closing_iters=args.closing_iters,
+                fill_holes_enabled=args.fill_holes,
+                median_ksize=args.median,
+            )
             scores.append(score_image(gt_instances, pred_instances))
 
         mean_score = float(np.mean(scores)) if scores else 0.0

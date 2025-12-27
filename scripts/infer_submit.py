@@ -15,7 +15,7 @@ import sys
 sys.path.insert(0, str(SRC_ROOT))
 
 from forgeryseg.dataset import build_test_index, build_train_index
-from forgeryseg.postprocess import binarize, extract_components
+from forgeryseg.postprocess import prob_to_instances
 from forgeryseg.rle import encode_instances
 
 
@@ -50,6 +50,10 @@ def main() -> None:
     parser.add_argument("--out-csv", default="outputs/submission.csv", help="Output CSV path")
     parser.add_argument("--threshold", type=float, default=0.5, help="Binarization threshold")
     parser.add_argument("--min-area", type=int, default=0, help="Minimum component area")
+    parser.add_argument("--closing", type=int, default=0, help="Morphological closing kernel size (0=disabled)")
+    parser.add_argument("--closing-iters", type=int, default=1, help="Morphological closing iterations")
+    parser.add_argument("--fill-holes", action="store_true", help="Fill holes in binary mask")
+    parser.add_argument("--median", type=int, default=0, help="Median smoothing kernel size (0=disabled, odd>=3)")
     parser.add_argument("--config", default="", help="JSON config with threshold/min_area")
     parser.add_argument("--split", choices=["test", "train"], default="test")
     args = parser.parse_args()
@@ -57,6 +61,10 @@ def main() -> None:
     cfg = _load_config(args.config)
     threshold = float(cfg.get("threshold", args.threshold))
     min_area = int(cfg.get("min_area", args.min_area))
+    closing = int(cfg.get("closing", args.closing))
+    closing_iters = int(cfg.get("closing_iters", args.closing_iters))
+    fill_holes = bool(cfg.get("fill_holes", args.fill_holes))
+    median = int(cfg.get("median", args.median))
 
     data_root = Path(args.data_root)
     preds_root = Path(args.preds_root)
@@ -77,8 +85,15 @@ def main() -> None:
 
         pred = np.load(pred_path)
         if pred.ndim == 2:
-            bin_mask = binarize(pred, threshold)
-            instances = extract_components(bin_mask, min_area=min_area)
+            instances = prob_to_instances(
+                pred,
+                threshold=threshold,
+                min_area=min_area,
+                closing_ksize=closing,
+                closing_iters=closing_iters,
+                fill_holes_enabled=fill_holes,
+                median_ksize=median,
+            )
         elif pred.ndim == 3:
             instances = [(p >= threshold).astype(np.uint8) for p in pred]
             instances = _filter_instances(instances, min_area)

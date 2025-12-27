@@ -15,7 +15,7 @@ sys.path.insert(0, str(SRC_ROOT))
 
 from forgeryseg.dataset import build_train_index, load_mask_instances
 from forgeryseg.metric import score_image
-from forgeryseg.postprocess import binarize, extract_components
+from forgeryseg.postprocess import prob_to_instances
 
 
 def _parse_floats(text: str) -> list[float]:
@@ -36,6 +36,10 @@ def main() -> None:
     parser.add_argument("--preds-root", required=True, help="Root directory with .npy predictions")
     parser.add_argument("--thresholds", default="0.3,0.4,0.5,0.6,0.7", help="Comma-separated")
     parser.add_argument("--min-areas", default="0,32,64,128", help="Comma-separated")
+    parser.add_argument("--closing", type=int, default=0, help="Morphological closing kernel size (0=disabled)")
+    parser.add_argument("--closing-iters", type=int, default=1, help="Morphological closing iterations")
+    parser.add_argument("--fill-holes", action="store_true", help="Fill holes in binary mask")
+    parser.add_argument("--median", type=int, default=0, help="Median smoothing kernel size (0=disabled, odd>=3)")
     parser.add_argument("--limit", type=int, default=0, help="Limit number of samples (debug)")
     parser.add_argument("--out-config", default="configs/thresholds.json", help="Output JSON config")
     args = parser.parse_args()
@@ -62,8 +66,15 @@ def main() -> None:
 
                 pred = np.load(pred_path)
                 if pred.ndim == 2:
-                    bin_mask = binarize(pred, threshold)
-                    pred_instances = extract_components(bin_mask, min_area=min_area)
+                    pred_instances = prob_to_instances(
+                        pred,
+                        threshold=threshold,
+                        min_area=min_area,
+                        closing_ksize=args.closing,
+                        closing_iters=args.closing_iters,
+                        fill_holes_enabled=args.fill_holes,
+                        median_ksize=args.median,
+                    )
                 elif pred.ndim == 3:
                     pred_instances = [(p >= threshold).astype(np.uint8) for p in pred]
                     if min_area:
@@ -82,7 +93,18 @@ def main() -> None:
     out_path = Path(args.out_config)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     with out_path.open("w") as f:
-        json.dump({"threshold": best["threshold"], "min_area": best["min_area"]}, f, indent=2)
+        json.dump(
+            {
+                "threshold": best["threshold"],
+                "min_area": best["min_area"],
+                "closing": int(args.closing),
+                "closing_iters": int(args.closing_iters),
+                "fill_holes": bool(args.fill_holes),
+                "median": int(args.median),
+            },
+            f,
+            indent=2,
+        )
 
     print(f"Best: score={best['score']:.6f} threshold={best['threshold']} min_area={best['min_area']}")
     print(f"Wrote {out_path}")

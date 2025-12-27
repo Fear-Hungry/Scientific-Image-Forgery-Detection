@@ -1,3 +1,8 @@
+# ---
+# jupyter:
+#   jupytext:
+#     formats: ipynb,py:percent
+# ---
 # %% [markdown]
 # # Pipeline único — Fases 1→4 (Kaggle / Offline)
 #
@@ -26,6 +31,7 @@ print("- Output: /kaggle/working/submission.csv")
 # %%
 # Fase 1 — Célula 2: Imports + ambiente
 import csv
+import json
 import os
 import random
 import sys
@@ -98,10 +104,6 @@ def _find_offline_bundle() -> Path | None:
     return candidates[0]
 
 
-def _is_competition_dataset_dir(path: Path) -> bool:
-    return (path / "train_images").exists() or (path / "test_images").exists() or (path / "train_masks").exists()
-
-
 def _candidate_python_roots(base: Path) -> list[Path]:
     roots = [
         base,
@@ -118,8 +120,10 @@ def _candidate_python_roots(base: Path) -> list[Path]:
 
 def add_local_package_to_syspath(package_dir_name: str) -> list[Path]:
     """
-    Procura por `package_dir_name/__init__.py` em `/kaggle/input/*` (exceto o dataset da competição)
-    e adiciona o root correspondente ao `sys.path`.
+    Procura por `package_dir_name/__init__.py` em `/kaggle/input/*` e adiciona o root correspondente ao `sys.path`.
+
+    Nota: não excluímos o dataset da competição, pois alguns usuários empacotam o código junto com os dados
+    em um único Kaggle Dataset. A busca é rasa (não percorre imagens), então o custo é baixo.
     """
     added: list[Path] = []
     if not is_kaggle():
@@ -130,8 +134,6 @@ def add_local_package_to_syspath(package_dir_name: str) -> list[Path]:
         return added
 
     for ds in sorted(kaggle_input.glob("*")):
-        if _is_competition_dataset_dir(ds):
-            continue
         for root in _candidate_python_roots(ds):
             pkg = root / package_dir_name
             if (pkg / "__init__.py").exists():
@@ -161,7 +163,7 @@ def add_local_package_to_syspath(package_dir_name: str) -> list[Path]:
             print(" ...")
         return uniq
 
-    print(f"[LOCAL IMPORT] não encontrei '{package_dir_name}/__init__.py' em `/kaggle/input/*` (fora do dataset da competição).")
+    print(f"[LOCAL IMPORT] não encontrei '{package_dir_name}/__init__.py' em `/kaggle/input/*`.")
     return added
 
 
@@ -193,50 +195,88 @@ else:
 
 # %%
 # Fase 1 — Célula 2c: Import do projeto (src/forgeryseg)
+
+def _maybe_add_src_to_syspath(src_root: Path) -> bool:
+    if (src_root / "forgeryseg" / "__init__.py").exists() and str(src_root) not in sys.path:
+        sys.path.insert(0, str(src_root))
+        return True
+    return False
+
+
 try:
     import forgeryseg  # type: ignore
 except Exception:
-    local_src = Path("src").resolve()
-    if (local_src / "forgeryseg" / "__init__.py").exists() and str(local_src) not in sys.path:
-        sys.path.insert(0, str(local_src))
+    _maybe_add_src_to_syspath(Path("src").resolve())
     if is_kaggle():
         add_local_package_to_syspath("forgeryseg")
     import forgeryseg  # type: ignore
 
-print("forgeryseg:", Path(forgeryseg.__file__).resolve())
+FORGERYSEG_FILE = Path(forgeryseg.__file__).resolve()
+print("forgeryseg:", FORGERYSEG_FILE)
+
+PROJECT_ROOT: Path | None = None
+try:
+    if FORGERYSEG_FILE.parent.name == "forgeryseg" and FORGERYSEG_FILE.parent.parent.name == "src":
+        PROJECT_ROOT = FORGERYSEG_FILE.parents[2]
+except Exception:
+    PROJECT_ROOT = None
+print("PROJECT_ROOT:", PROJECT_ROOT)
 
 from torch.utils.data import DataLoader, Dataset  # noqa: E402
 
 from forgeryseg.augment import get_train_augment, get_val_augment  # noqa: E402
 from forgeryseg.checkpoints import build_classifier_from_config, build_segmentation_from_config, load_checkpoint  # noqa: E402
 from forgeryseg.constants import AUTHENTIC_LABEL  # noqa: E402
+from forgeryseg.data_analysis import quick_dataset_stats  # noqa: E402
 from forgeryseg.dataset import PatchDataset, build_test_index, build_train_index, load_image  # noqa: E402
 from forgeryseg.inference import normalize_image, predict_image  # noqa: E402
 from forgeryseg.losses import BCETverskyLoss  # noqa: E402
 from forgeryseg.models import builders  # noqa: E402
 from forgeryseg.models.classifier import build_classifier, compute_pos_weight  # noqa: E402
+from forgeryseg.offline import configure_cache_dirs  # noqa: E402
 from forgeryseg.postprocess import binarize, extract_components  # noqa: E402
 from forgeryseg.rle import encode_instances  # noqa: E402
 from forgeryseg.train import train_one_epoch, validate  # noqa: E402
+
+# %%
+# Fase 1 — Célula 2d: Cache dirs (offline weights)
+#
+# Para usar pesos pré-treinados no Kaggle com internet OFF, anexe um Dataset contendo caches e aponte aqui.
+# Exemplo de estrutura sugerida:
+# - <CACHE_ROOT>/torch  (TORCH_HOME)
+# - <CACHE_ROOT>/hf     (HF_HOME)
+CACHE_ROOT = os.environ.get("FORGERYSEG_CACHE_ROOT", "")
+if CACHE_ROOT:
+    configure_cache_dirs(CACHE_ROOT)
+    print("[CACHE] FORGERYSEG_CACHE_ROOT:", CACHE_ROOT)
+else:
+    print("[CACHE] FORGERYSEG_CACHE_ROOT vazio (seguindo sem caches).")
 
 # %%
 # Fase 1 — Célula 3: Dataset root + contagens
 
 
 def find_dataset_root() -> Path:
+    def _looks_like_root(p: Path) -> bool:
+        return (p / "train_images").exists() and (p / "test_images").exists()
+
     if is_kaggle():
         base = Path("/kaggle/input/recodai-luc-scientific-image-forgery-detection")
-        if base.exists():
+        if _looks_like_root(base):
             return base
         kaggle_input = Path("/kaggle/input")
         if kaggle_input.exists():
             for ds in sorted(kaggle_input.glob("*")):
-                if (ds / "train_images").exists() and (ds / "test_images").exists():
+                if _looks_like_root(ds):
                     return ds
 
-    base = Path("data").resolve()
-    if (base / "train_images").exists() and (base / "test_images").exists():
-        return base
+    local_candidates = [
+        Path("data/recodai").resolve(),
+        Path("data").resolve(),
+    ]
+    for cand in local_candidates:
+        if _looks_like_root(cand):
+            return cand
 
     raise FileNotFoundError("Dataset não encontrado. No Kaggle: anexe o dataset da competição.")
 
@@ -267,77 +307,53 @@ print("test samples:", len(test_samples))
 # - As imagens têm tamanhos variados e podem ser coloridas ou em escala de cinza. Padronizamos a leitura para **3 canais RGB**
 #   (via `PIL.Image.convert("RGB")`, usado em `forgeryseg.dataset.load_image`).
 # - Para segmentação, em vez de redimensionar agressivamente a imagem inteira, trabalhamos com **patches de tamanho fixo**
-#   (`SEG_PATCH_SIZE=512`) usando **padding + crop** durante o treino. Isso preserva detalhes finos de falsificações pequenas.
+#   (`SEG_PATCH_SIZE`, ex.: 384/512) usando **padding + crop** durante o treino. Isso preserva detalhes finos de falsificações pequenas.
 # - Em inferência, usamos **tiling** (`TILE_SIZE`/`OVERLAP`) para lidar com imagens grandes sem perder resolução.
+#
+# ### Normalização
+#
+# - Aplicamos **normalização padronizada por canal** (médias/desvios do ImageNet) para manter a escala esperada pelos modelos
+#   — especialmente útil com backbones pré-treinados.
+# - Existe variação de contraste entre artigos/figuras; equalização/normalização por imagem pode ajudar, mas pode também
+#   alterar evidências sutis. Preferimos manter o pré-processamento **mínimo** e ganhar robustez com augmentations.
+#
+# ### Divisão de dados (validação local)
+#
+# - A competição avalia no **test set oculto**; para desenvolvimento usamos validação local a partir do treino.
+# - Usamos **5-fold estratificado** (authentic vs forged) para melhor uso dos dados e para reduzir overfitting.
+# - Na inferência, carregamos todos os checkpoints encontrados e fazemos **ensemble** (média das probabilidades).
+#
+# ### Data augmentation (aumento de dados)
+#
+# `forgeryseg.augment.get_train_augment(...)` aplica (imagem + máscara) transforms geométricos e (só na imagem) transforms
+# fotométricos para robustez:
+#
+# - Flips/rotações (`HorizontalFlip`, `VerticalFlip`, `RandomRotate90`)
+# - Affine/escala (`Affine`, `RandomResizedCrop` quando `patch_size` é definido)
+# - Ruído/desfoque (`GaussNoise`, `GaussianBlur`, `MotionBlur`)
+# - Brilho/contraste/CLAHE (`RandomBrightnessContrast`, `RandomGamma`, `CLAHE`)
+# - Copy-move sintético (custom `CopyMoveTransform`) para gerar falsificações on-the-fly em máscaras vazias
+#
+# ### Modelo de classificação (forged vs authentic)
+#
+# Classificador opcional para (1) sinal global “tem fraude?” e (2) economizar tempo:
+#
+# - CNN pré-treinada (ex.: EfficientNet via `timm`) com saída binária (`num_classes=1`).
+# - Loss: `BCEWithLogitsLoss` com `pos_weight`.
+# - Inferência: se `p_forged < CLS_SKIP_THRESHOLD`, rotulamos como `AUTHENTIC_LABEL` e pulamos a segmentação.
+#
+# ### Modelo de segmentação (localização)
+#
+# Segmentação prevê logits (1 canal); aplicamos **sigmóide** para probabilidades. O pipeline suporta ensemble heterogêneo:
+#
+# - **U-Net++** (detalhe fino) + **DeepLabV3+** (contexto multi-escala) + opcional **SegFormer** (atenção global).
 #
 # ---
 
 # %%
 # Fase 1 — Célula 3b: Stats rápidos (tamanho / canais / máscaras)
-from collections import Counter
-
-RUN_DATA_ANALYSIS = True
+RUN_DATA_ANALYSIS = not is_kaggle()
 ANALYSIS_MAX_ITEMS = 200
-
-
-def quick_dataset_stats(samples, *, max_items: int = 200, seed: int = 42, name: str = "train") -> None:
-    """
-    Análise leve e offline-friendly:
-    - tamanhos (HxW) via PIL (sem carregar arrays grandes)
-    - modos/canais originais (L/RGB/RGBA/...)
-    - checagem de shape das máscaras `.npy` quando existirem
-    """
-    if not samples:
-        print(f"[{name}] vazio.")
-        return
-
-    rng = np.random.default_rng(int(seed))
-    idxs = np.arange(len(samples), dtype=np.int64)
-    if len(idxs) > int(max_items):
-        idxs = rng.choice(idxs, size=int(max_items), replace=False)
-
-    modes: Counter[str] = Counter()
-    heights: list[int] = []
-    widths: list[int] = []
-    mask_present = 0
-    mask_shape_mismatch = 0
-    mask_positive_frac: list[float] = []
-
-    from PIL import Image
-
-    for i in idxs.tolist():
-        s = samples[int(i)]
-        try:
-            with Image.open(s.image_path) as img:
-                modes[str(img.mode)] += 1
-                w, h = img.size
-            heights.append(int(h))
-            widths.append(int(w))
-
-            if s.mask_path is not None and Path(s.mask_path).exists():
-                mask_present += 1
-                masks = np.load(s.mask_path, mmap_mode="r")
-                union = masks if masks.ndim == 2 else masks.max(axis=0)
-                if union.shape != (h, w):
-                    mask_shape_mismatch += 1
-                pos = int((union > 0).sum())
-                mask_positive_frac.append(pos / float(union.shape[0] * union.shape[1]))
-        except Exception:
-            print(f"[{name}] erro ao ler:", s.image_path)
-            traceback.print_exc()
-
-    n = len(idxs)
-    h_min, h_max = (min(heights), max(heights)) if heights else (None, None)
-    w_min, w_max = (min(widths), max(widths)) if widths else (None, None)
-    print(f"[{name}] amostra: {n}/{len(samples)}")
-    print(f"[{name}] modos (originais):", dict(modes))
-    print(f"[{name}] H: min={h_min} max={h_max} | W: min={w_min} max={w_max}")
-    if mask_present:
-        frac_mean = float(np.mean(mask_positive_frac)) if mask_positive_frac else 0.0
-        frac_p95 = float(np.percentile(mask_positive_frac, 95)) if len(mask_positive_frac) >= 2 else frac_mean
-        print(f"[{name}] máscaras presentes (na amostra): {mask_present} | shape mismatch: {mask_shape_mismatch}")
-        print(f"[{name}] fração positiva (union): mean={frac_mean:.6f} p95={frac_p95:.6f}")
-
 
 if RUN_DATA_ANALYSIS:
     quick_dataset_stats(train_samples, max_items=ANALYSIS_MAX_ITEMS, seed=SEED, name="train")
@@ -365,15 +381,39 @@ def _has_any_ckpt(dir_name: str, pattern: str) -> bool:
 HAS_SEG_CKPT = _has_any_ckpt("models_seg", "*/*/best.pt")
 HAS_CLS_CKPT = _has_any_ckpt("models_cls", "fold_*/best.pt")
 
-# Defaults "rodáveis": se não há checkpoints, treinamos segmentação para conseguir gerar a submissão.
+# Utils
+def _env_bool(name: str, default: bool) -> bool:
+    v = os.environ.get(name, "")
+    if v == "":
+        return bool(default)
+    return str(v).strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+# Modos:
+# - "infer_only": só inferência (exige checkpoints anexados)
+# - "train_then_infer": força treino antes da submissão
+# - "auto": se não houver checkpoints, treina o mínimo para conseguir gerar `submission.csv`
+_default_pipeline_mode = "train_then_infer" if is_kaggle() else "auto"
+PIPELINE_MODE = os.environ.get("FORGERYSEG_PIPELINE_MODE", _default_pipeline_mode).strip().lower()
+
+# Defaults "rodáveis": por padrão, no Kaggle tentamos gerar `submission.csv` sem intervenção manual.
 # (Você pode sobrescrever manualmente aqui.)
 RUN_TRAIN_CLS = False
-RUN_TRAIN_SEG = not HAS_SEG_CKPT
+if PIPELINE_MODE == "infer_only":
+    RUN_TRAIN_SEG = False
+elif PIPELINE_MODE == "train_then_infer":
+    RUN_TRAIN_SEG = True
+else:
+    RUN_TRAIN_SEG = not HAS_SEG_CKPT
 RUN_SUBMISSION = True
 
 N_FOLDS = 5
 FOLD = 0
 
+FAST_TRAIN = _env_bool("FORGERYSEG_FAST_TRAIN", default=bool(is_kaggle() and not HAS_SEG_CKPT))
+
+print("PIPELINE_MODE:", PIPELINE_MODE)
+print("FAST_TRAIN:", FAST_TRAIN)
 print("RUN_TRAIN_CLS:", RUN_TRAIN_CLS)
 print("RUN_TRAIN_SEG:", RUN_TRAIN_SEG)
 print("RUN_SUBMISSION:", RUN_SUBMISSION)
@@ -423,9 +463,13 @@ CLS_MODEL_NAME = "tf_efficientnet_b4_ns"
 CLS_IMAGE_SIZE = 384
 CLS_BATCH_SIZE = 32
 CLS_EPOCHS = 10
+CLS_PATIENCE = 3
 CLS_LR = 3e-4
 CLS_WEIGHT_DECAY = 1e-2
-CLS_SKIP_THRESHOLD = 0.30
+# Preferir recall (evitar falsos negativos): só pule a segmentação quando tiver alta confiança de autenticidade.
+CLS_SKIP_THRESHOLD = 0.10
+# Pesos pré-treinados ajudam, mas no Kaggle com internet OFF podem não estar disponíveis.
+CLS_PRETRAINED = True
 
 
 def build_transform(train: bool) -> T.Compose:
@@ -466,7 +510,15 @@ if RUN_TRAIN_CLS:
     dl_cls_train = DataLoader(ds_cls_train, batch_size=CLS_BATCH_SIZE, shuffle=True, num_workers=num_workers, pin_memory=(DEVICE == "cuda"), drop_last=True)
     dl_cls_val = DataLoader(ds_cls_val, batch_size=CLS_BATCH_SIZE, shuffle=False, num_workers=num_workers, pin_memory=(DEVICE == "cuda"), drop_last=False)
 
-    cls_model = build_classifier(model_name=CLS_MODEL_NAME, pretrained=False, num_classes=1).to(DEVICE)
+    try:
+        cls_model = build_classifier(model_name=CLS_MODEL_NAME, pretrained=CLS_PRETRAINED, num_classes=1).to(DEVICE)
+    except Exception:
+        if CLS_PRETRAINED:
+            print("[CLS] falha ao carregar pesos pré-treinados; fallback para pretrained=False.")
+            traceback.print_exc()
+            cls_model = build_classifier(model_name=CLS_MODEL_NAME, pretrained=False, num_classes=1).to(DEVICE)
+        else:
+            raise
     pos_weight = torch.tensor(compute_pos_weight(train_labels[train_idx]), dtype=torch.float32, device=DEVICE)
     cls_criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
     cls_optimizer = torch.optim.AdamW(cls_model.parameters(), lr=CLS_LR, weight_decay=CLS_WEIGHT_DECAY)
@@ -523,6 +575,7 @@ if RUN_TRAIN_CLS:
     cls_best_path = cls_save_dir / "best.pt"
 
     best_score = -1.0
+    best_epoch = 0
     for epoch in range(1, int(CLS_EPOCHS) + 1):
         tr_loss = cls_train_one_epoch()
         val = cls_eval()
@@ -530,13 +583,24 @@ if RUN_TRAIN_CLS:
         print(f"[CLS] epoch {epoch:02d}/{CLS_EPOCHS} | train_loss={tr_loss:.4f} | val={val}")
         if score > best_score:
             best_score = score
+            best_epoch = int(epoch)
             ckpt = {
                 "model_state": cls_model.state_dict(),
-                "config": {"backend": "timm", "model_name": CLS_MODEL_NAME, "image_size": int(CLS_IMAGE_SIZE), "fold": int(FOLD), "seed": int(SEED)},
+                "config": {
+                    "backend": "timm",
+                    "model_name": CLS_MODEL_NAME,
+                    "image_size": int(CLS_IMAGE_SIZE),
+                    "pretrained": bool(CLS_PRETRAINED),
+                    "fold": int(FOLD),
+                    "seed": int(SEED),
+                },
                 "score": float(best_score),
             }
             torch.save(ckpt, cls_best_path)
             print("[CLS] saved best ->", cls_best_path)
+        if CLS_PATIENCE and best_epoch and (int(epoch) - int(best_epoch) >= int(CLS_PATIENCE)):
+            print(f"[CLS] early stopping: sem melhora por {CLS_PATIENCE} épocas (best_epoch={best_epoch}).")
+            break
 
     print("[CLS] done. best score:", best_score)
 else:
@@ -544,17 +608,32 @@ else:
 
 # %%
 # Fase 3 — Célula 7: Treino de segmentação (opcional)
-SEG_MODEL_ID = "unetpp_effb4"
-SEG_ENCODER = "efficientnet-b4"
 SEG_PATCH_SIZE = 384
+SEG_COPY_MOVE_PROB = 0.20
 SEG_BATCH_SIZE = 8
 SEG_EPOCHS = 8
 SEG_LR = 1e-3
 SEG_WEIGHT_DECAY = 1e-2
 SEG_PATIENCE = 3
+# Pesos pré-treinados: preferível (offline via cache); fallback para None se falhar.
+SEG_ENCODER_WEIGHTS = "imagenet"
+
+# Para performance máxima, treine mais de uma arquitetura e faça ensemble na inferência.
+SEG_TRAIN_SPECS = [
+    {"model_id": "unetpp_tu_convnext_small", "arch": "unetplusplus", "encoder_name": "tu-convnext_small"},
+    {"model_id": "deeplabv3p_tu_resnest101e", "arch": "deeplabv3plus", "encoder_name": "tu-resnest101e"},
+    {"model_id": "segformer_mit_b2", "arch": "segformer", "encoder_name": "mit_b2"},
+]
+
+if FAST_TRAIN:
+    print("[SEG] FAST_TRAIN=True -> preset rápido (1 modelo / poucas épocas).")
+    SEG_EPOCHS = min(int(SEG_EPOCHS), 2)
+    SEG_TRAIN_SPECS = [
+        {"model_id": "unetpp_tu_convnext_small", "arch": "unetplusplus", "encoder_name": "tu-convnext_small"},
+    ]
 
 if RUN_TRAIN_SEG:
-    train_aug = get_train_augment(patch_size=SEG_PATCH_SIZE, copy_move_prob=0.20)
+    train_aug = get_train_augment(patch_size=SEG_PATCH_SIZE, copy_move_prob=SEG_COPY_MOVE_PROB)
     val_aug = get_val_augment()
 
     ds_seg_train = PatchDataset([train_samples[i] for i in train_idx.tolist()], patch_size=SEG_PATCH_SIZE, train=True, augment=train_aug, positive_prob=0.7, seed=SEED)
@@ -564,39 +643,91 @@ if RUN_TRAIN_SEG:
     dl_seg_train = DataLoader(ds_seg_train, batch_size=SEG_BATCH_SIZE, shuffle=True, num_workers=num_workers, pin_memory=(DEVICE == "cuda"), drop_last=True)
     dl_seg_val = DataLoader(ds_seg_val, batch_size=SEG_BATCH_SIZE, shuffle=False, num_workers=num_workers, pin_memory=(DEVICE == "cuda"), drop_last=False)
 
-    seg_model = builders.build_unetplusplus(encoder_name=SEG_ENCODER, encoder_weights=None, classes=1, strict_weights=True).to(DEVICE)
-    seg_criterion = BCETverskyLoss(alpha=0.7, beta=0.3, tversky_weight=1.0)
-    seg_optimizer = torch.optim.AdamW(seg_model.parameters(), lr=SEG_LR, weight_decay=SEG_WEIGHT_DECAY)
-
     def output_root() -> Path:
         return Path("/kaggle/working") if is_kaggle() else Path(".").resolve()
 
-    seg_save_dir = output_root() / "outputs" / "models_seg" / SEG_MODEL_ID / f"fold_{int(FOLD)}"
-    seg_save_dir.mkdir(parents=True, exist_ok=True)
-    seg_best_path = seg_save_dir / "best.pt"
-
     use_amp = (DEVICE == "cuda")
-    best_dice = -1.0
-    best_epoch = 0
-    for epoch in range(1, int(SEG_EPOCHS) + 1):
-        tr = train_one_epoch(seg_model, dl_seg_train, seg_criterion, seg_optimizer, DEVICE, use_amp=use_amp, progress=True, desc="seg train")
-        val_stats, val_dice = validate(seg_model, dl_seg_val, seg_criterion, DEVICE, progress=True, desc="seg val")
-        print(f"[SEG] epoch {epoch:02d}/{SEG_EPOCHS} | train_loss={tr.loss:.4f} | val_loss={val_stats.loss:.4f} | dice@0.5={val_dice:.4f}")
-        if float(val_dice) > best_dice:
-            best_dice = float(val_dice)
-            best_epoch = int(epoch)
-            ckpt = {
-                "model_state": seg_model.state_dict(),
-                "config": {"backend": "smp", "arch": "unetplusplus", "encoder_name": SEG_ENCODER, "encoder_weights": None, "classes": 1, "model_id": SEG_MODEL_ID, "patch_size": int(SEG_PATCH_SIZE), "fold": int(FOLD), "seed": int(SEED)},
-                "score": float(best_dice),
-            }
-            torch.save(ckpt, seg_best_path)
-            print("[SEG] saved best ->", seg_best_path)
-        if SEG_PATIENCE and best_epoch and (int(epoch) - int(best_epoch) >= int(SEG_PATIENCE)):
-            print(f"[SEG] early stopping: sem melhora por {SEG_PATIENCE} épocas (best_epoch={best_epoch}).")
-            break
 
-    print("[SEG] done. best dice:", best_dice)
+    def build_seg_model(arch: str, encoder_name: str, encoder_weights: str | None) -> nn.Module:
+        arch = str(arch).lower()
+        if arch in {"unetplusplus", "unetpp"}:
+            return builders.build_unetplusplus(
+                encoder_name=encoder_name,
+                encoder_weights=encoder_weights,
+                classes=1,
+                strict_weights=True,
+            )
+        if arch in {"deeplabv3plus", "deeplabv3+", "deeplabv3p"}:
+            return builders.build_deeplabv3plus(
+                encoder_name=encoder_name,
+                encoder_weights=encoder_weights,
+                classes=1,
+                strict_weights=True,
+            )
+        if arch in {"segformer", "mit"}:
+            return builders.build_segformer(
+                encoder_name=encoder_name,
+                encoder_weights=encoder_weights,
+                classes=1,
+                strict_weights=True,
+            )
+        raise ValueError(f"SEG arch inválida: {arch!r}")
+
+    for spec in SEG_TRAIN_SPECS:
+        model_id = str(spec["model_id"])
+        arch = str(spec.get("arch", "unetplusplus"))
+        encoder_name = str(spec.get("encoder_name", "efficientnet-b4"))
+        encoder_weights: str | None = spec.get("encoder_weights", SEG_ENCODER_WEIGHTS)
+
+        try:
+            seg_model = build_seg_model(arch, encoder_name, encoder_weights).to(DEVICE)
+        except Exception:
+            if encoder_weights is not None:
+                print(f"[SEG] falha ao carregar encoder_weights={encoder_weights!r}; fallback para None.")
+                traceback.print_exc()
+                encoder_weights = None
+                seg_model = build_seg_model(arch, encoder_name, encoder_weights).to(DEVICE)
+            else:
+                raise
+
+        seg_criterion = BCETverskyLoss(alpha=0.7, beta=0.3, tversky_weight=1.0)
+        seg_optimizer = torch.optim.AdamW(seg_model.parameters(), lr=SEG_LR, weight_decay=SEG_WEIGHT_DECAY)
+
+        seg_save_dir = output_root() / "outputs" / "models_seg" / model_id / f"fold_{int(FOLD)}"
+        seg_save_dir.mkdir(parents=True, exist_ok=True)
+        seg_best_path = seg_save_dir / "best.pt"
+
+        best_dice = -1.0
+        best_epoch = 0
+        for epoch in range(1, int(SEG_EPOCHS) + 1):
+            tr = train_one_epoch(seg_model, dl_seg_train, seg_criterion, seg_optimizer, DEVICE, use_amp=use_amp, progress=True, desc=f"seg train ({model_id})")
+            val_stats, val_dice = validate(seg_model, dl_seg_val, seg_criterion, DEVICE, progress=True, desc=f"seg val ({model_id})")
+            print(f"[SEG {model_id}] epoch {epoch:02d}/{SEG_EPOCHS} | train_loss={tr.loss:.4f} | val_loss={val_stats.loss:.4f} | dice@0.5={val_dice:.4f}")
+            if float(val_dice) > best_dice:
+                best_dice = float(val_dice)
+                best_epoch = int(epoch)
+                ckpt = {
+                    "model_state": seg_model.state_dict(),
+                    "config": {
+                        "backend": "smp",
+                        "arch": arch,
+                        "encoder_name": encoder_name,
+                        "encoder_weights": encoder_weights,
+                        "classes": 1,
+                        "model_id": model_id,
+                        "patch_size": int(SEG_PATCH_SIZE),
+                        "fold": int(FOLD),
+                        "seed": int(SEED),
+                    },
+                    "score": float(best_dice),
+                }
+                torch.save(ckpt, seg_best_path)
+                print("[SEG] saved best ->", seg_best_path)
+            if SEG_PATIENCE and best_epoch and (int(epoch) - int(best_epoch) >= int(SEG_PATIENCE)):
+                print(f"[SEG {model_id}] early stopping: sem melhora por {SEG_PATIENCE} épocas (best_epoch={best_epoch}).")
+                break
+
+        print(f"[SEG {model_id}] done. best dice:", best_dice)
 else:
     print("[SEG] RUN_TRAIN_SEG=False (pulando).")
 
@@ -671,13 +802,52 @@ print("loaded cls models:", len(CLS_MODELS))
 
 # %%
 # Fase 4 — Célula 9: Inferência + submission
-TILE_SIZE = 1024
-OVERLAP = 128
-MAX_SIZE = 0
-THRESHOLD = 0.50
-MIN_AREA = 32
-USE_TTA = True
-TTA_MODES = ("none", "hflip", "vflip")
+def _find_infer_cfg_path() -> Path | None:
+    candidates: list[Path] = []
+    if PROJECT_ROOT is not None:
+        candidates.append(PROJECT_ROOT / "configs" / "infer_ensemble.json")
+    candidates.append(Path("configs/infer_ensemble.json").resolve())
+
+    for p in candidates:
+        if p.exists():
+            return p
+
+    if is_kaggle():
+        kaggle_input = Path("/kaggle/input")
+        if kaggle_input.exists():
+            for ds in sorted(kaggle_input.glob("*")):
+                for base in (ds, ds / "recodai_bundle"):
+                    p = base / "configs" / "infer_ensemble.json"
+                    if p.exists():
+                        return p
+    return None
+
+
+INFER_CFG_PATH = _find_infer_cfg_path()
+INFER_CFG: dict = {}
+if INFER_CFG_PATH is not None:
+    with INFER_CFG_PATH.open("r") as f:
+        INFER_CFG = json.load(f)
+    print("[INFER CFG] loaded:", INFER_CFG_PATH)
+else:
+    print("[INFER CFG] configs/infer_ensemble.json não encontrado; usando defaults do notebook.")
+
+TILE_SIZE = int(INFER_CFG.get("tile_size", 1024))
+OVERLAP = int(INFER_CFG.get("overlap", 128))
+MAX_SIZE = int(INFER_CFG.get("max_size", 0))
+THRESHOLD = float(INFER_CFG.get("threshold", 0.50))
+MIN_AREA = int(INFER_CFG.get("min_area", 32))
+
+if isinstance(INFER_CFG.get("tta_modes"), (list, tuple)):
+    TTA_MODES = tuple(str(x) for x in INFER_CFG.get("tta_modes") if str(x).strip())
+else:
+    TTA_MODES = ("none", "hflip")
+
+USE_TTA = bool(TTA_MODES)
+if FAST_TRAIN:
+    USE_TTA = False
+
+CLS_SKIP_THRESHOLD = float(INFER_CFG.get("cls_skip_threshold", CLS_SKIP_THRESHOLD))
 
 
 def _apply_tta(image: np.ndarray, mode: str) -> np.ndarray:
@@ -775,5 +945,14 @@ if RUN_SUBMISSION:
             writer.writerow({"case_id": s.case_id, "annotation": encode_instances(inst)})
 
     print("wrote:", SUBMISSION_PATH)
+    try:
+        with SUBMISSION_PATH.open("r") as f:
+            header = f.readline().strip()
+        if header != "case_id,annotation":
+            raise ValueError(f"Header inesperado: {header!r}")
+        print("[SUBMISSION] header OK:", header)
+    except Exception:
+        print("[SUBMISSION] WARN: não consegui validar o header do CSV.")
+        traceback.print_exc()
 else:
     print("[SUBMISSION] RUN_SUBMISSION=False; não gerou CSV.")

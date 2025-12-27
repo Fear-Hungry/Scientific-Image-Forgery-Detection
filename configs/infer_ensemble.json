@@ -11,7 +11,7 @@
   "cls_skip_threshold": 0.1,
   "models": [
     {
-      "model_id": "unetpp_tu_convnext_small",
+      "model_id": "unet_tu_convnext_small",
       "weight": 1.0
     },
     {

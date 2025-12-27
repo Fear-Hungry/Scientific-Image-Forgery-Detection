@@ -1,6 +1,6 @@
 {
-  "model_id": "unetpp_tu_convnext_small",
-  "arch": "unetplusplus",
+  "model_id": "unet_tu_convnext_small",
+  "arch": "unet",
   "encoder_name": "tu-convnext_small",
   "encoder_weights": "imagenet",
   "patch_size": 512,

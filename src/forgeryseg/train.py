@@ -21,6 +21,18 @@ def _maybe_tqdm(iterable, enabled: bool, desc: str):
         return iterable
 
 
+def _autocast_ctx(device: str, enabled: bool):
+    """
+    Compatibility helper for AMP autocast across torch versions.
+
+    `torch.cuda.amp.autocast` is deprecated in recent torch; prefer `torch.amp.autocast`.
+    """
+    if hasattr(torch, "amp") and hasattr(torch.amp, "autocast"):
+        device_type = "cuda" if str(device).startswith("cuda") else "cpu"
+        return torch.amp.autocast(device_type, enabled=enabled)
+    return torch.cuda.amp.autocast(enabled=enabled)
+
+
 @torch.no_grad()
 def _batch_dice(logits: torch.Tensor, targets: torch.Tensor, threshold: float = 0.5) -> torch.Tensor:
     probs = torch.sigmoid(logits)
@@ -51,7 +63,7 @@ def train_one_epoch(
         images = images.to(device)
         masks = masks.to(device)
         optimizer.zero_grad(set_to_none=True)
-        with torch.cuda.amp.autocast(enabled=use_amp):
+        with _autocast_ctx(device, enabled=use_amp):
             logits = model(images)
             loss = criterion(logits, masks)
         scaler.scale(loss).backward()

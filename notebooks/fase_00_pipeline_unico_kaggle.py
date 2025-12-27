@@ -620,7 +620,9 @@ SEG_ENCODER_WEIGHTS = "imagenet"
 
 # Para performance máxima, treine mais de uma arquitetura e faça ensemble na inferência.
 SEG_TRAIN_SPECS = [
-    {"model_id": "unetpp_tu_convnext_small", "arch": "unetplusplus", "encoder_name": "tu-convnext_small"},
+    # SMP Unet++ + timm Universal ConvNeXt (tu-convnext_*) está quebrado no SMP 0.5.x (gera convs com out_channels=0).
+    # Usamos Unet (ConvNeXt) como base estável.
+    {"model_id": "unet_tu_convnext_small", "arch": "unet", "encoder_name": "tu-convnext_small"},
     {"model_id": "deeplabv3p_tu_resnest101e", "arch": "deeplabv3plus", "encoder_name": "tu-resnest101e"},
     {"model_id": "segformer_mit_b2", "arch": "segformer", "encoder_name": "mit_b2"},
 ]
@@ -629,7 +631,7 @@ if FAST_TRAIN:
     print("[SEG] FAST_TRAIN=True -> preset rápido (1 modelo / poucas épocas).")
     SEG_EPOCHS = min(int(SEG_EPOCHS), 2)
     SEG_TRAIN_SPECS = [
-        {"model_id": "unetpp_tu_convnext_small", "arch": "unetplusplus", "encoder_name": "tu-convnext_small"},
+        {"model_id": "unet_tu_convnext_small", "arch": "unet", "encoder_name": "tu-convnext_small"},
     ]
 
 if RUN_TRAIN_SEG:
@@ -650,6 +652,13 @@ if RUN_TRAIN_SEG:
 
     def build_seg_model(arch: str, encoder_name: str, encoder_weights: str | None) -> nn.Module:
         arch = str(arch).lower()
+        if arch == "unet":
+            return builders.build_unet(
+                encoder_name=encoder_name,
+                encoder_weights=encoder_weights,
+                classes=1,
+                strict_weights=True,
+            )
         if arch in {"unetplusplus", "unetpp"}:
             return builders.build_unetplusplus(
                 encoder_name=encoder_name,

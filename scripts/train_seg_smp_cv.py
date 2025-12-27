@@ -85,6 +85,13 @@ def _build_seg_model(cfg: dict) -> nn.Module:
     classes = int(cfg.get("classes", 1))
     strict_weights = bool(cfg.get("strict_weights", False))
 
+    if arch == "unet":
+        return builders.build_unet(
+            encoder_name=encoder_name,
+            encoder_weights=encoder_weights,
+            classes=classes,
+            strict_weights=strict_weights,
+        )
     if arch in {"unetplusplus", "unetpp"}:
         return builders.build_unetplusplus(
             encoder_name=encoder_name,

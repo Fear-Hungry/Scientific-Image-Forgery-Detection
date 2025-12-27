@@ -140,7 +140,20 @@ def main() -> None:
         train_samples = [samples[i] for i in train_idx] + supplemental_samples
         val_samples = [samples[i] for i in val_idx]
 
-        train_aug = get_train_augment(patch_size=patch_size)
+        copy_move_scale_range = cfg.get("copy_move_scale_range", (0.9, 1.1))
+        if isinstance(copy_move_scale_range, (list, tuple)) and len(copy_move_scale_range) == 2:
+            copy_move_scale_range = (float(copy_move_scale_range[0]), float(copy_move_scale_range[1]))
+        else:
+            copy_move_scale_range = (0.9, 1.1)
+
+        train_aug = get_train_augment(
+            patch_size=patch_size,
+            copy_move_prob=float(cfg.get("copy_move_prob", 0.0)),
+            copy_move_min_area_frac=float(cfg.get("copy_move_min_area_frac", 0.05)),
+            copy_move_max_area_frac=float(cfg.get("copy_move_max_area_frac", 0.20)),
+            copy_move_rotation_limit=float(cfg.get("copy_move_rotation_limit", 15.0)),
+            copy_move_scale_range=copy_move_scale_range,
+        )
         val_aug = get_val_augment()
 
         train_ds = PatchDataset(

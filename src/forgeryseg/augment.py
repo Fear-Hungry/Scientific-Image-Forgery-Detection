@@ -5,6 +5,8 @@ import os
 
 os.environ.setdefault("NO_ALBUMENTATIONS_UPDATE", "1")
 
+import numpy as np
+
 try:
     import albumentations as A
 except ImportError:  # pragma: no cover - optional dependency
@@ -97,7 +99,224 @@ def _gauss_noise(p: float):
     return A.GaussNoise(var_limit=(5.0, 50.0), p=p)
 
 
-def get_train_augment(patch_size: int | tuple[int, int] | None = None, mean=IMAGENET_MEAN, std=IMAGENET_STD):
+if A is not None:
+    from albumentations.core.transforms_interface import DualTransform
+
+    class CopyMoveTransform(DualTransform):
+        """Synthetic copy-move augmentation for training.
+
+        If the incoming mask is empty (authentic sample), copies a random region from the image and pastes it into
+        another location, and marks both source and destination regions as forged in the mask.
+        """
+
+        def __init__(
+            self,
+            min_area_frac: float = 0.05,
+            max_area_frac: float = 0.20,
+            rotation_limit: float = 15.0,
+            scale_range: tuple[float, float] = (0.9, 1.1),
+            irregular_prob: float = 0.5,
+            max_tries: int = 10,
+            only_if_empty_mask: bool = True,
+            p: float = 0.25,
+        ) -> None:
+            super().__init__(p=float(p))
+            self.min_area_frac = float(min_area_frac)
+            self.max_area_frac = float(max_area_frac)
+            self.rotation_limit = float(rotation_limit)
+            self.scale_range = (float(scale_range[0]), float(scale_range[1]))
+            self.irregular_prob = float(irregular_prob)
+            self.max_tries = int(max_tries)
+            self.only_if_empty_mask = bool(only_if_empty_mask)
+
+            if not (0.0 < self.min_area_frac <= self.max_area_frac <= 1.0):
+                raise ValueError("Expected 0 < min_area_frac <= max_area_frac <= 1")
+            if self.max_tries <= 0:
+                raise ValueError("max_tries must be > 0")
+            if not (0.0 <= self.irregular_prob <= 1.0):
+                raise ValueError("irregular_prob must be in [0, 1]")
+            if self.scale_range[0] <= 0.0 or self.scale_range[1] <= 0.0:
+                raise ValueError("scale_range values must be > 0")
+
+        @property
+        def targets_as_params(self):  # type: ignore[override]
+            return ["image", "mask"]
+
+        def get_params_dependent_on_data(self, params: dict, data: dict) -> dict:
+            image = data["image"]
+            mask = data.get("mask")
+            if mask is None:
+                return {"do": False}
+
+            mask = np.asarray(mask)
+            if mask.ndim != 2:
+                return {"do": False}
+
+            if self.only_if_empty_mask and mask.max() > 0:
+                return {"do": False}
+
+            h, w = mask.shape
+            if h < 16 or w < 16:
+                return {"do": False}
+
+            rg = self.random_generator
+
+            area_frac = float(rg.uniform(self.min_area_frac, self.max_area_frac))
+            target_area = area_frac * float(h * w)
+
+            # Prefer near-square regions; allow mild aspect variation.
+            aspect = float(np.exp(rg.uniform(np.log(0.75), np.log(1.3333333333333333))))
+            patch_h = int(round(np.sqrt(target_area / aspect)))
+            patch_w = int(round(patch_h * aspect))
+            patch_h = int(np.clip(patch_h, 8, h - 1))
+            patch_w = int(np.clip(patch_w, 8, w - 1))
+
+            y_choices = h - patch_h + 1
+            x_choices = w - patch_w + 1
+            if y_choices <= 0 or x_choices <= 0:
+                return {"do": False}
+            if y_choices == 1 and x_choices == 1:
+                return {"do": False}
+
+            src_y = int(rg.integers(0, y_choices))
+            src_x = int(rg.integers(0, x_choices))
+
+            # Pick destination (prefer non-overlapping paste; fallback to any different position).
+            chosen: tuple[int, int] | None = None
+            for _ in range(self.max_tries):
+                cand_y = int(rg.integers(0, y_choices))
+                cand_x = int(rg.integers(0, x_choices))
+                if cand_y == src_y and cand_x == src_x:
+                    continue
+
+                if chosen is None:
+                    chosen = (cand_y, cand_x)
+
+                y_overlap = max(0, min(src_y + patch_h, cand_y + patch_h) - max(src_y, cand_y))
+                x_overlap = max(0, min(src_x + patch_w, cand_x + patch_w) - max(src_x, cand_x))
+                if (y_overlap * x_overlap) == 0:
+                    chosen = (cand_y, cand_x)
+                    break
+
+            if chosen is None:
+                # Deterministic shift (guarantees a different coordinate when possible).
+                dst_y = (src_y + 1) % y_choices if y_choices > 1 else src_y
+                dst_x = (src_x + 1) % x_choices if x_choices > 1 else src_x
+                if dst_y == src_y and dst_x == src_x:
+                    return {"do": False}
+            else:
+                dst_y, dst_x = chosen
+
+            # Build a (possibly irregular) region mask inside the patch window.
+            if float(rg.random()) < self.irregular_prob:
+                yy, xx = np.mgrid[0:patch_h, 0:patch_w]
+                cy = float(patch_h - 1) / 2.0 + float(rg.uniform(-0.15, 0.15)) * patch_h
+                cx = float(patch_w - 1) / 2.0 + float(rg.uniform(-0.15, 0.15)) * patch_w
+                ry = max(2.0, float(rg.uniform(0.35, 0.55)) * patch_h)
+                rx = max(2.0, float(rg.uniform(0.35, 0.55)) * patch_w)
+                mask_src = (((yy - cy) / ry) ** 2 + ((xx - cx) / rx) ** 2 <= 1.0).astype(np.uint8)
+            else:
+                mask_src = np.ones((patch_h, patch_w), dtype=np.uint8)
+
+            if int(mask_src.sum()) == 0:
+                mask_src = np.ones((patch_h, patch_w), dtype=np.uint8)
+
+            angle = float(rg.uniform(-self.rotation_limit, self.rotation_limit)) if self.rotation_limit > 0 else 0.0
+            scale = float(rg.uniform(self.scale_range[0], self.scale_range[1]))
+
+            # Transform destination mask (what we actually paste) if OpenCV is available.
+            if cv2 is not None and (abs(angle) > 1e-6 or abs(scale - 1.0) > 1e-6):
+                center = (float(patch_w) / 2.0, float(patch_h) / 2.0)
+                mat = cv2.getRotationMatrix2D(center, angle, scale)
+                mask_dst = cv2.warpAffine(
+                    mask_src,
+                    mat,
+                    dsize=(patch_w, patch_h),
+                    flags=cv2.INTER_NEAREST,
+                    borderMode=cv2.BORDER_CONSTANT,
+                    borderValue=0,
+                ).astype(np.uint8)
+                if int(mask_dst.sum()) == 0:
+                    mask_dst = mask_src
+            else:
+                mat = None
+                mask_dst = mask_src
+
+            return {
+                "do": True,
+                "src_y": src_y,
+                "src_x": src_x,
+                "dst_y": dst_y,
+                "dst_x": dst_x,
+                "patch_h": patch_h,
+                "patch_w": patch_w,
+                "mask_src": mask_src,
+                "mask_dst": mask_dst,
+                "mat": mat,
+            }
+
+        def apply(self, img: np.ndarray, *args, **params) -> np.ndarray:
+            if not params.get("do", False):
+                return img
+
+            src_y = int(params["src_y"])
+            src_x = int(params["src_x"])
+            dst_y = int(params["dst_y"])
+            dst_x = int(params["dst_x"])
+            patch_h = int(params["patch_h"])
+            patch_w = int(params["patch_w"])
+            mask_dst = np.asarray(params["mask_dst"]).astype(bool)
+            mat = params.get("mat", None)
+
+            out = img.copy()
+            src_patch = out[src_y : src_y + patch_h, src_x : src_x + patch_w].copy()
+
+            if mat is not None and cv2 is not None:
+                src_patch = cv2.warpAffine(
+                    src_patch,
+                    mat,
+                    dsize=(patch_w, patch_h),
+                    flags=cv2.INTER_LINEAR,
+                    borderMode=cv2.BORDER_REFLECT_101,
+                )
+
+            dst_patch = out[dst_y : dst_y + patch_h, dst_x : dst_x + patch_w]
+            dst_patch[mask_dst] = src_patch[mask_dst]
+            out[dst_y : dst_y + patch_h, dst_x : dst_x + patch_w] = dst_patch
+            return out
+
+        def apply_to_mask(self, mask: np.ndarray, *args, **params) -> np.ndarray:
+            if not params.get("do", False):
+                return mask
+
+            src_y = int(params["src_y"])
+            src_x = int(params["src_x"])
+            dst_y = int(params["dst_y"])
+            dst_x = int(params["dst_x"])
+            patch_h = int(params["patch_h"])
+            patch_w = int(params["patch_w"])
+            mask_src = np.asarray(params["mask_src"]).astype(bool)
+            mask_dst = np.asarray(params["mask_dst"]).astype(bool)
+
+            out = (np.asarray(mask) > 0).astype(np.uint8)
+            out[src_y : src_y + patch_h, src_x : src_x + patch_w][mask_src] = 1
+            out[dst_y : dst_y + patch_h, dst_x : dst_x + patch_w][mask_dst] = 1
+            return out
+
+else:  # pragma: no cover - albumentations optional
+    CopyMoveTransform = None
+
+
+def get_train_augment(
+    patch_size: int | tuple[int, int] | None = None,
+    mean=IMAGENET_MEAN,
+    std=IMAGENET_STD,
+    copy_move_prob: float = 0.0,
+    copy_move_min_area_frac: float = 0.05,
+    copy_move_max_area_frac: float = 0.20,
+    copy_move_rotation_limit: float = 15.0,
+    copy_move_scale_range: tuple[float, float] = (0.9, 1.1),
+):
     if A is None:
         raise ImportError("albumentations is required for augmentations")
     hw = _as_hw(patch_size)
@@ -106,7 +325,7 @@ def get_train_augment(patch_size: int | tuple[int, int] | None = None, mean=IMAG
     affine_kwargs: dict = {
         "scale": (0.8, 1.2),
         "translate_percent": (-0.05, 0.05),
-        "rotate": (-180, 180),
+        "rotate": (-20, 20),
         "p": 0.75,
         **_fill_kwargs(A.Affine, fill_value=0),
     }
@@ -120,9 +339,24 @@ def get_train_augment(patch_size: int | tuple[int, int] | None = None, mean=IMAG
         affine_kwargs["mode"] = border_mode
 
     transforms = [
+        # Synthetic copy-move (applied only when mask is empty).
+        *(
+            [
+                CopyMoveTransform(
+                    min_area_frac=copy_move_min_area_frac,
+                    max_area_frac=copy_move_max_area_frac,
+                    rotation_limit=copy_move_rotation_limit,
+                    scale_range=copy_move_scale_range,
+                    p=float(copy_move_prob),
+                )
+            ]
+            if CopyMoveTransform is not None and float(copy_move_prob) > 0.0
+            else []
+        ),
         # Geometric transforms (copy-move can include flips/rotation/scale).
         A.HorizontalFlip(p=0.5),
         A.VerticalFlip(p=0.5),
+        A.RandomRotate90(p=0.25),
         A.Affine(**affine_kwargs),
     ]
 

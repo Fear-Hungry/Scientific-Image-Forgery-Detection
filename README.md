@@ -24,7 +24,7 @@ Imagens científicas (microscopia, *western blots*, gráficos, etc.) são fundam
 
 Esta competição foca em um tipo específico e comum de fraude: **copy-move forgery** (*copia-e-cola dentro da própria imagem*), onde regiões são duplicadas para “fabricar” sinais/estruturas, esconder artefatos ou reforçar um achado.
 
-O conjunto de dados é descrito como composto por **forjamentos confirmados** extraídos de **milhares de artigos retratados**, buscando refletir cenários realistas de fraude em imagens biomédicas.
+O conjunto de dados é descrito como composto por **forjamentos confirmados** extraídos de **milhares (2.000+) de artigos retratados**, buscando refletir cenários realistas de fraude em imagens biomédicas.
 
 O objetivo é desenvolver um modelo que:
 
@@ -57,6 +57,8 @@ Uma imagem (PNG) de contexto biomédico/científico.
 ### Por que é difícil
 
 - Diversidade de formatos e resoluções (figuras compostas, múltiplos painéis, artefatos de compressão).
+- Copy-move tende a ser sutil: a região copiada vem da própria imagem e, portanto, pode ter aparência quase idêntica ao restante.
+- Falsificadores podem aplicar transformações e pós-processamentos (rotação/escala, borrão, ruído, ajustes de brilho/contraste, compressão JPEG).
 - Forjamentos podem ser pequenos e sutis.
 - Uma imagem pode conter **várias instâncias** de regiões duplicadas.
 - A avaliação considera **matching ótimo** entre instâncias previstas e *ground truth* (não é apenas IoU de uma máscara “única”).

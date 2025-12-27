@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
 
-from forgeryseg.augment import get_train_augment, get_val_augment
+from forgeryseg.augment import CopyMoveTransform, get_train_augment, get_val_augment
 from forgeryseg.dataset import build_supplemental_index
 
 
@@ -21,6 +21,45 @@ def test_train_augment_preserves_shape_and_binary_mask():
     assert out["image"].shape == image.shape
     assert out["mask"].shape == mask.shape
     assert set(np.unique(out["mask"]).tolist()).issubset({0, 1})
+
+
+def test_copy_move_transform_adds_mask_on_empty_input():
+    h = w = 96
+    rng = np.random.default_rng(0)
+    image = rng.integers(0, 256, size=(h, w, 3), dtype=np.uint8)
+    mask = np.zeros((h, w), dtype=np.uint8)
+
+    try:
+        import albumentations as A
+    except ImportError:
+        pytest.skip("albumentations is not installed")
+    if CopyMoveTransform is None:
+        pytest.skip("CopyMoveTransform requires albumentations")
+
+    aug = A.Compose([CopyMoveTransform(p=1.0, rotation_limit=0.0, scale_range=(1.0, 1.0))])
+    out = aug(image=image, mask=mask)
+    assert out["mask"].shape == mask.shape
+    assert set(np.unique(out["mask"]).tolist()).issubset({0, 1})
+    assert int(out["mask"].sum()) > 0
+
+
+def test_copy_move_transform_skips_when_mask_non_empty():
+    h = w = 96
+    rng = np.random.default_rng(1)
+    image = rng.integers(0, 256, size=(h, w, 3), dtype=np.uint8)
+    mask = np.zeros((h, w), dtype=np.uint8)
+    mask[10:30, 20:40] = 1
+
+    try:
+        import albumentations as A
+    except ImportError:
+        pytest.skip("albumentations is not installed")
+    if CopyMoveTransform is None:
+        pytest.skip("CopyMoveTransform requires albumentations")
+
+    aug = A.Compose([CopyMoveTransform(p=1.0)])
+    out = aug(image=image, mask=mask)
+    assert np.array_equal(out["mask"], mask)
 
 
 def test_val_augment_is_identity():

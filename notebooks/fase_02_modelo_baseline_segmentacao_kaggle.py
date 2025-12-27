@@ -48,16 +48,55 @@ random.seed(RANDOM_SEED)
 np.random.seed(RANDOM_SEED)
 torch.manual_seed(RANDOM_SEED)
 
-DATA_ROOT = Path("/kaggle/input/recodai-luc-scientific-image-forgery-detection").resolve()
+def is_kaggle() -> bool:
+    return bool(os.environ.get("KAGGLE_URL_BASE")) or Path("/kaggle").exists()
+
+
+def find_dataset_root() -> Path:
+    # Kaggle: padrão da competição
+    if is_kaggle():
+        base = Path("/kaggle/input/recodai-luc-scientific-image-forgery-detection")
+        if base.exists():
+            return base
+
+        # fallback: procura qualquer dataset anexado que tenha a estrutura esperada
+        kaggle_input = Path("/kaggle/input")
+        if kaggle_input.exists():
+            for ds in sorted(kaggle_input.glob("*")):
+                if (ds / "train_images").exists() and (ds / "test_images").exists():
+                    return ds
+
+    # Local (repo): `data/`
+    base = Path("data").resolve()
+    if (base / "train_images").exists() and (base / "test_images").exists():
+        return base
+
+    raise FileNotFoundError(
+        "Dataset não encontrado.\n"
+        "- No Kaggle: anexe o dataset da competição (Add data) e garanta que existe `train_images/`.\n"
+        "- Local: espere `data/train_images` e `data/train_masks`."
+    )
+
+
+DATA_ROOT = find_dataset_root()
 TRAIN_IMAGES = DATA_ROOT / "train_images"
 TRAIN_MASKS = DATA_ROOT / "train_masks"
 
 print("DATA_ROOT:", DATA_ROOT)
 print("Train images dir:", TRAIN_IMAGES)
 print("Train masks dir:", TRAIN_MASKS)
-print("Train/authentic:", len(list((TRAIN_IMAGES / "authentic").glob("*.png"))))
-print("Train/forged:", len(list((TRAIN_IMAGES / "forged").glob("*.png"))))
-print("Masks:", len(list(TRAIN_MASKS.glob("*.npy"))))
+num_auth = len(list((TRAIN_IMAGES / "authentic").glob("*.png")))
+num_forged = len(list((TRAIN_IMAGES / "forged").glob("*.png")))
+num_masks = len(list(TRAIN_MASKS.glob("*.npy")))
+print("Train/authentic:", num_auth)
+print("Train/forged:", num_forged)
+print("Masks:", num_masks)
+if num_auth == 0 and num_forged == 0:
+    raise FileNotFoundError(
+        "Nenhuma imagem encontrada em `train_images/authentic` e `train_images/forged`.\n"
+        f"DATA_ROOT={DATA_ROOT}\n"
+        "No Kaggle, isso normalmente significa que o dataset da competição não foi anexado ao notebook."
+    )
 
 # %%
 # Celula 4 — Index do dataset (DataFrame principal)
@@ -119,12 +158,20 @@ def build_train_index(train_images_dir: Path, train_masks_dir: Path) -> pd.DataF
                     "read_error": read_error,
                 }
             )
+    if not rows:
+        raise FileNotFoundError(
+            "Index vazio: não encontrei arquivos `*.png`.\n"
+            f"train_images_dir={train_images_dir}\n"
+            "Verifique se o dataset correto foi anexado no Kaggle (Add data)."
+        )
     return pd.DataFrame(rows)
 
 
 df = build_train_index(TRAIN_IMAGES, TRAIN_MASKS)
 display(df.head())
 print("Rows:", len(df))
+if "label" not in df.columns:
+    raise KeyError(f"df não tem coluna 'label'. colunas={df.columns.tolist()}")
 display(df["label"].value_counts())
 print("Read errors:", int(df["read_error"].notna().sum()))
 

@@ -8,6 +8,35 @@ except ImportError:  # pragma: no cover - optional dependency
     smp = None
 
 
+def _as_positive_int(value: Any, *, name: str) -> int:
+    if isinstance(value, bool):
+        raise TypeError(f"{name} must be an int, got bool")
+    try:
+        value_int = int(value)
+    except Exception as exc:  # pragma: no cover - defensive
+        raise TypeError(f"{name} must be an int, got {type(value).__name__}: {value!r}") from exc
+    if value_int <= 0:
+        raise ValueError(f"{name} must be >= 1, got {value_int}")
+    return value_int
+
+
+def _as_positive_int_sequence(value: Any, *, name: str, expected_len: int | None = None) -> tuple[int, ...]:
+    if isinstance(value, (str, bytes)):
+        raise TypeError(f"{name} must be a sequence of ints, got {type(value).__name__}: {value!r}")
+    try:
+        values = list(value)
+    except TypeError as exc:
+        raise TypeError(f"{name} must be a sequence of ints, got {type(value).__name__}: {value!r}") from exc
+
+    if expected_len is not None and len(values) != expected_len:
+        raise ValueError(f"{name} must have length {expected_len}, got {len(values)}: {values!r}")
+
+    out: list[int] = []
+    for idx, v in enumerate(values):
+        out.append(_as_positive_int(v, name=f"{name}[{idx}]"))
+    return tuple(out)
+
+
 def available_encoders() -> list[str]:
     if smp is None:
         return []
@@ -42,6 +71,10 @@ def build_unet(
 ):
     if smp is None:
         raise ImportError("segmentation_models_pytorch is required for Unet models")
+    encoder_depth = _as_positive_int(encoder_depth, name="encoder_depth")
+    in_channels = _as_positive_int(in_channels, name="in_channels")
+    classes = _as_positive_int(classes, name="classes")
+    decoder_channels = _as_positive_int_sequence(decoder_channels, name="decoder_channels", expected_len=encoder_depth)
     return _safe_init(
         smp.Unet,
         encoder_name=encoder_name,
@@ -70,6 +103,11 @@ def build_segformer(
 ):
     if smp is None:
         raise ImportError("segmentation_models_pytorch is required for SegFormer models")
+    encoder_depth = _as_positive_int(encoder_depth, name="encoder_depth")
+    decoder_segmentation_channels = _as_positive_int(decoder_segmentation_channels, name="decoder_segmentation_channels")
+    in_channels = _as_positive_int(in_channels, name="in_channels")
+    classes = _as_positive_int(classes, name="classes")
+    upsampling = _as_positive_int(upsampling, name="upsampling")
     return _safe_init(
         smp.Segformer,
         encoder_name=encoder_name,
@@ -98,6 +136,10 @@ def build_unetplusplus(
 ):
     if smp is None:
         raise ImportError("segmentation_models_pytorch is required for Unet++ models")
+    encoder_depth = _as_positive_int(encoder_depth, name="encoder_depth")
+    in_channels = _as_positive_int(in_channels, name="in_channels")
+    classes = _as_positive_int(classes, name="classes")
+    decoder_channels = _as_positive_int_sequence(decoder_channels, name="decoder_channels", expected_len=encoder_depth)
     return _safe_init(
         smp.UnetPlusPlus,
         encoder_name=encoder_name,
@@ -126,6 +168,11 @@ def build_deeplabv3plus(
 ):
     if smp is None:
         raise ImportError("segmentation_models_pytorch is required for DeepLabV3+ models")
+    encoder_depth = _as_positive_int(encoder_depth, name="encoder_depth")
+    decoder_channels = _as_positive_int(decoder_channels, name="decoder_channels")
+    in_channels = _as_positive_int(in_channels, name="in_channels")
+    classes = _as_positive_int(classes, name="classes")
+    atrous_rates = _as_positive_int_sequence(atrous_rates, name="atrous_rates")
     return _safe_init(
         smp.DeepLabV3Plus,
         encoder_name=encoder_name,

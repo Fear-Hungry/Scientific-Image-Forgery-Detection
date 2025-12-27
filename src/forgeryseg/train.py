@@ -10,6 +10,27 @@ class TrainStats:
     loss: float
 
 
+def _ensure_no_empty_parameters(model) -> None:
+    """
+    Fail fast on invalid models that contain parameters with zero elements.
+
+    This can happen when a segmentation model is built with `classes=0` or
+    `decoder_channels` containing 0, which otherwise triggers cryptic runtime
+    errors inside conv layers.
+    """
+    if getattr(model, "_forgeryseg_checked_params", False):
+        return
+    empty = [name for name, p in model.named_parameters() if p is not None and p.numel() == 0]
+    if empty:
+        shown = ", ".join(empty[:5])
+        suffix = "" if len(empty) <= 5 else f" (+{len(empty) - 5} more)"
+        raise ValueError(
+            "Model has parameter tensor(s) with zero elements "
+            f"({shown}{suffix}). Check your model config (e.g., `classes` or `decoder_channels`)."
+        )
+    setattr(model, "_forgeryseg_checked_params", True)
+
+
 def _maybe_tqdm(iterable, enabled: bool, desc: str):
     if not enabled:
         return iterable
@@ -56,6 +77,7 @@ def train_one_epoch(
     desc: str = "train",
 ) -> TrainStats:
     model.train()
+    _ensure_no_empty_parameters(model)
     total_loss = 0.0
     scaler = torch.cuda.amp.GradScaler(enabled=use_amp)
 
@@ -83,6 +105,7 @@ def validate(
     desc: str = "val",
 ) -> tuple[TrainStats, float]:
     model.eval()
+    _ensure_no_empty_parameters(model)
     total_loss = 0.0
     dice_scores = []
     with torch.no_grad():

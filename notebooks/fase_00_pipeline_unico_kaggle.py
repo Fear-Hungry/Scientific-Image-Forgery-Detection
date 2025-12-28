@@ -322,6 +322,14 @@ def _env_bool(name: str, default: bool) -> bool:
     return str(v).strip().lower() in {"1", "true", "yes", "y", "on"}
 
 
+ALLOW_DOWNLOAD = _env_bool("FORGERYSEG_ALLOW_DOWNLOAD", default=not is_kaggle())
+OFFLINE_NO_DOWNLOAD = bool(is_kaggle() and not CACHE_ROOT and not ALLOW_DOWNLOAD)
+if OFFLINE_NO_DOWNLOAD:
+    os.environ.setdefault("HF_HUB_OFFLINE", "1")
+    os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
+    print("[OFFLINE] downloads disabled (no cache).")
+
+
 N_FOLDS = int(os.environ.get("FORGERYSEG_N_FOLDS", "5"))
 FOLD = int(os.environ.get("FORGERYSEG_FOLD", "0"))
 
@@ -388,7 +396,7 @@ CLS_WEIGHT_DECAY = 1e-2
 # Preferir recall (evitar falsos negativos): só pule a segmentação quando tiver alta confiança de autenticidade.
 CLS_SKIP_THRESHOLD = 0.10
 # Pesos pré-treinados ajudam, mas no Kaggle com internet OFF podem não estar disponíveis.
-CLS_PRETRAINED = True
+CLS_PRETRAINED = not OFFLINE_NO_DOWNLOAD
 
 
 def build_transform(train: bool) -> T.Compose:
@@ -425,7 +433,7 @@ if RUN_TRAIN_CLS:
     ds_cls_train = ClsDataset([train_samples[i] for i in train_idx.tolist()], build_transform(train=True))
     ds_cls_val = ClsDataset([train_samples[i] for i in val_idx.tolist()], build_transform(train=False))
 
-    num_workers = 2 if is_kaggle() else 0
+    num_workers = NUM_WORKERS
     dl_cls_train = DataLoader(ds_cls_train, batch_size=CLS_BATCH_SIZE, shuffle=True, num_workers=num_workers, pin_memory=(DEVICE == "cuda"), drop_last=True)
     dl_cls_val = DataLoader(ds_cls_val, batch_size=CLS_BATCH_SIZE, shuffle=False, num_workers=num_workers, pin_memory=(DEVICE == "cuda"), drop_last=False)
 
@@ -536,6 +544,8 @@ SEG_WEIGHT_DECAY = 1e-2
 SEG_PATIENCE = 3
 # Pesos pré-treinados: preferível (offline via cache); fallback para None se falhar.
 SEG_ENCODER_WEIGHTS = "imagenet"
+if OFFLINE_NO_DOWNLOAD:
+    SEG_ENCODER_WEIGHTS = None
 
 # Para performance máxima, treine mais de uma arquitetura e faça ensemble na inferência.
 SEG_TRAIN_SPECS = [
@@ -549,9 +559,14 @@ SEG_TRAIN_SPECS = [
 if FAST_TRAIN:
     print("[SEG] FAST_TRAIN=True -> preset rápido (1 modelo / poucas épocas).")
     SEG_EPOCHS = min(int(SEG_EPOCHS), 2)
-    SEG_TRAIN_SPECS = [
-        {"model_id": "unet_tu_convnext_small", "arch": "unet", "encoder_name": "tu-convnext_small"},
-    ]
+    if OFFLINE_NO_DOWNLOAD:
+        SEG_TRAIN_SPECS = [
+            {"model_id": "unet_resnet34", "arch": "unet", "encoder_name": "resnet34", "encoder_weights": None},
+        ]
+    else:
+        SEG_TRAIN_SPECS = [
+            {"model_id": "unet_tu_convnext_small", "arch": "unet", "encoder_name": "tu-convnext_small"},
+        ]
 
 if RUN_TRAIN_SEG:
     train_aug = get_train_augment(patch_size=SEG_PATCH_SIZE, copy_move_prob=SEG_COPY_MOVE_PROB)
@@ -683,6 +698,7 @@ else:
 
 # %%
 # Fase 4 — Célula 8: Imports + leitura de dados (roteiro oficial)
+import json
 import pandas as pd
 from PIL import Image
 from pathlib import Path
@@ -699,6 +715,15 @@ TRAIN_MASKS = DATA_DIR / "train_masks"  # se houver
 
 VALID_EXTS = {".png", ".jpg", ".jpeg", ".tif", ".tiff"}
 test_images = sorted([p for p in TEST_DIR.iterdir() if p.suffix.lower() in VALID_EXTS])
+test_by_id = {p.stem: p for p in test_images}
+
+sample_submission_path = DATA_DIR / "sample_submission.csv"
+sample_submission = None
+case_ids = [p.stem for p in test_images]
+if sample_submission_path.exists():
+    sample_submission = pd.read_csv(sample_submission_path)
+    if "case_id" in sample_submission.columns:
+        case_ids = sample_submission["case_id"].tolist()
 
 print("DATA_DIR:", DATA_DIR)
 print("TEST_DIR:", TEST_DIR)
@@ -706,49 +731,72 @@ print("#test images:", len(test_images))
 
 # %%
 # Fase 4 — Célula 9: Funções RLE (roteiro oficial)
-# converte uma máscara binária (array 2D de 0s e 1s) em run-length encoding
-# retorna uma string no formato "[inicio1 comprimento1 inicio2 comprimento2 ...]"
-def rle_encode(mask: np.ndarray) -> str:
-    # Flatten the mask row-wise
-    pixels = mask.flatten(order="C")
-    # Add a zero at both ends to capture runs at the edges
-    pixels = np.concatenate([[0], pixels, [0]])
-    # Encontrar posições onde o valor muda (de 0→1 ou 1→0)
-    changes = np.where(pixels[1:] != pixels[:-1])[0] + 1
-    # Comprimentos dos segmentos são as diferenças entre as posições de mudança
-    runs = changes[1::2] - changes[::2]
-    starts = changes[::2]
-    # Combine em pares [início comprimento]
-    pairs = np.column_stack((starts, runs)).flatten()
-    return "[" + " ".join(map(str, pairs)) + "]"
+# A métrica oficial usa JSON para a lista de pares [start, length, ...]
+# e suporta múltiplas instâncias separadas por ';'.
+def _rle_encode_single(mask: np.ndarray, fg_val: int = 1) -> list[int]:
+    dots = np.where(mask.flatten(order="C") == fg_val)[0]  # row-major (C)
+    run_lengths: list[int] = []
+    prev = -2
+    for b in dots:
+        b = int(b)
+        if b > prev + 1:
+            run_lengths.extend([b + 1, 0])  # start 1-based
+        run_lengths[-1] += 1
+        prev = b
+    return run_lengths
 
 
-def rle_decode(rle: str, shape: tuple[int, int]) -> np.ndarray:
-    text = rle.strip()
+def rle_encode(masks: list[np.ndarray] | np.ndarray, fg_val: int = 1) -> str:
+    if isinstance(masks, np.ndarray):
+        masks = [masks]
+    parts: list[str] = []
+    for m in masks:
+        runs = _rle_encode_single(m, fg_val=fg_val)
+        if runs:
+            parts.append(json.dumps(runs))
+    if not parts:
+        return "authentic"
+    return ";".join(parts)
+
+
+def encode_submission(mask_union: np.ndarray) -> str:
+    if int(mask_union.sum()) <= 0:
+        return "authentic"
+    return rle_encode(mask_union.astype(np.uint8))
+
+
+def rle_decode(annotation: str, shape: tuple[int, int]) -> list[np.ndarray]:
+    text = annotation.strip()
     if text == "" or text.lower() == "authentic":
-        return np.zeros(shape, dtype=np.uint8)
-    if text.startswith("[") and text.endswith("]"):
-        text = text[1:-1].strip()
-    if not text:
-        return np.zeros(shape, dtype=np.uint8)
-    nums = [int(x) for x in text.replace(",", " ").split()]
-    starts = nums[::2]
-    lengths = nums[1::2]
-    mask = np.zeros(shape[0] * shape[1], dtype=np.uint8)
-    for s, l in zip(starts, lengths):
-        if l <= 0:
+        return []
+    masks: list[np.ndarray] = []
+    for part in text.split(";"):
+        part = part.strip()
+        if not part:
             continue
-        mask[int(s) : int(s + l)] = 1
-    return mask.reshape(shape, order="C")
+        runs = json.loads(part)
+        mask = np.zeros(shape[0] * shape[1], dtype=np.uint8)
+        for start, length in zip(runs[0::2], runs[1::2]):
+            if int(length) <= 0:
+                continue
+            start_index = int(start) - 1  # 1-based -> 0-based
+            end_index = start_index + int(length)
+            mask[start_index:end_index] = 1
+        masks.append(mask.reshape(shape, order="C"))
+    return masks
 
 # %%
 # Fase 4 — Célula 10: Baseline simples (tudo authentic)
-submissions = pd.DataFrame(
-    {
-        "case_id": [img.stem for img in test_images],
-        "annotation": ["authentic"] * len(test_images),
-    }
-)
+if sample_submission is not None:
+    submissions = sample_submission.copy()
+    submissions["annotation"] = "authentic"
+else:
+    submissions = pd.DataFrame(
+        {
+            "case_id": case_ids,
+            "annotation": ["authentic"] * len(case_ids),
+        }
+    )
 
 submissions.head()
 
@@ -764,20 +812,21 @@ if USE_MODEL_SUBMISSION:
         raise RuntimeError("Defina a variável `model` antes de ativar FORGERYSEG_USE_MODEL_SUBMISSION=1.")
 
     annotations = []
-    for img_path in test_images:
+    for case_id in case_ids:
+        key = str(case_id)
+        if key not in test_by_id:
+            raise FileNotFoundError(f"Não encontrei imagem para case_id={case_id!r}")
+        img_path = test_by_id[key]
         # carregue e processe a imagem
         img = np.array(Image.open(img_path)) / 255.0
         # modelo deve gerar um mapa de probabilidade ou máscara
         pred_prob = model.predict(img[None])[0]  # exemplo
         binary_mask = (pred_prob > THRESHOLD).astype(np.uint8)
-        if binary_mask.sum() == 0:
-            annotations.append("authentic")
-        else:
-            annotations.append(rle_encode(binary_mask))
+        annotations.append(encode_submission(binary_mask))
 
     submissions_from_model = pd.DataFrame(
         {
-            "case_id": [p.stem for p in test_images],
+            "case_id": case_ids,
             "annotation": annotations,
         }
     )

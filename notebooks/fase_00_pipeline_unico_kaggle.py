@@ -339,8 +339,8 @@ print("FAST_TRAIN:", FAST_TRAIN)
 print("HAS_SEG_CKPT:", HAS_SEG_CKPT)
 print("HAS_CLS_CKPT:", HAS_CLS_CKPT)
 
-RUN_TRAIN_CLS = _env_bool("FORGERYSEG_RUN_TRAIN_CLS", default=False)
-RUN_TRAIN_SEG = _env_bool("FORGERYSEG_RUN_TRAIN_SEG", default=not HAS_SEG_CKPT)
+RUN_TRAIN_CLS = _env_bool("FORGERYSEG_RUN_TRAIN_CLS", default=True)
+RUN_TRAIN_SEG = _env_bool("FORGERYSEG_RUN_TRAIN_SEG", default=True)
 
 print("RUN_TRAIN_CLS:", RUN_TRAIN_CLS)
 print("RUN_TRAIN_SEG:", RUN_TRAIN_SEG)

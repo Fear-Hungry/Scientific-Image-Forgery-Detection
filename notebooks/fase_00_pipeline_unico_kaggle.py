@@ -650,3 +650,234 @@ if RUN_TRAIN_SEG:
         print(f"[SEG {model_id}] done. best dice:", best_dice)
 else:
     print("[SEG] RUN_TRAIN_SEG=False (pulando).")
+
+# %% [markdown]
+# ## Fase 4 — Geração de `submission.csv` (roteiro oficial)
+#
+# A competição pede **segmentação** de regiões de copy-move e usa uma variante do **F1-score**,
+# portanto o foco é equilibrar precisão e recall. A métrica oficial usa **RLE (Run-Length Encoding)**.
+#
+# Abaixo está o **roteiro completo** para montar o notebook de submissão:
+#
+# ### 1) Importar bibliotecas e ler dados
+# - Define os caminhos de treino e teste no Kaggle.
+# - Lista as imagens de teste para gerar o CSV.
+#
+# ### 2) Funções de codificação RLE
+# - Usa RLE para converter máscaras binárias em string.
+#
+# ### 3) Lógica de predição (baseline)
+# - Baseline simples: assume todas as imagens como `authentic`.
+# - Opcional: gerar máscara via modelo e converter para RLE.
+#
+# ### 4) Gerar e salvar o arquivo de submissão
+# - Salva `submission.csv` em `/kaggle/working/`.
+
+# %%
+# Fase 4 — Célula 8: Imports + leitura de dados (roteiro oficial)
+import pandas as pd
+from PIL import Image
+from pathlib import Path
+import matplotlib.pyplot as plt
+
+# No Kaggle, o dataset costuma ficar aqui; se não existir, usa o DATA_ROOT detectado.
+DATA_DIR = Path("/kaggle/input/recodai-luc-scientific-image-forgery-detection")
+if not DATA_DIR.exists():
+    DATA_DIR = DATA_ROOT
+
+TRAIN_DIR = DATA_DIR / "train_images"
+TEST_DIR = DATA_DIR / "test_images"
+TRAIN_MASKS = DATA_DIR / "train_masks"  # se houver
+
+VALID_EXTS = {".png", ".jpg", ".jpeg", ".tif", ".tiff"}
+test_images = sorted([p for p in TEST_DIR.iterdir() if p.suffix.lower() in VALID_EXTS])
+
+print("DATA_DIR:", DATA_DIR)
+print("TEST_DIR:", TEST_DIR)
+print("#test images:", len(test_images))
+
+# %%
+# Fase 4 — Célula 9: Funções RLE (roteiro oficial)
+# converte uma máscara binária (array 2D de 0s e 1s) em run-length encoding
+# retorna uma string no formato "[inicio1 comprimento1 inicio2 comprimento2 ...]"
+def rle_encode(mask: np.ndarray) -> str:
+    # Flatten the mask row-wise
+    pixels = mask.flatten(order="C")
+    # Add a zero at both ends to capture runs at the edges
+    pixels = np.concatenate([[0], pixels, [0]])
+    # Encontrar posições onde o valor muda (de 0→1 ou 1→0)
+    changes = np.where(pixels[1:] != pixels[:-1])[0] + 1
+    # Comprimentos dos segmentos são as diferenças entre as posições de mudança
+    runs = changes[1::2] - changes[::2]
+    starts = changes[::2]
+    # Combine em pares [início comprimento]
+    pairs = np.column_stack((starts, runs)).flatten()
+    return "[" + " ".join(map(str, pairs)) + "]"
+
+
+def rle_decode(rle: str, shape: tuple[int, int]) -> np.ndarray:
+    text = rle.strip()
+    if text == "" or text.lower() == "authentic":
+        return np.zeros(shape, dtype=np.uint8)
+    if text.startswith("[") and text.endswith("]"):
+        text = text[1:-1].strip()
+    if not text:
+        return np.zeros(shape, dtype=np.uint8)
+    nums = [int(x) for x in text.replace(",", " ").split()]
+    starts = nums[::2]
+    lengths = nums[1::2]
+    mask = np.zeros(shape[0] * shape[1], dtype=np.uint8)
+    for s, l in zip(starts, lengths):
+        if l <= 0:
+            continue
+        mask[int(s) : int(s + l)] = 1
+    return mask.reshape(shape, order="C")
+
+# %%
+# Fase 4 — Célula 10: Baseline simples (tudo authentic)
+submissions = pd.DataFrame(
+    {
+        "case_id": [img.stem for img in test_images],
+        "annotation": ["authentic"] * len(test_images),
+    }
+)
+
+submissions.head()
+
+# %%
+# Fase 4 — Célula 11: Exemplo de loop com modelo (opcional)
+# Ative com FORGERYSEG_USE_MODEL_SUBMISSION=1 e defina `model`.
+USE_MODEL_SUBMISSION = _env_bool("FORGERYSEG_USE_MODEL_SUBMISSION", default=False)
+THRESHOLD = float(os.environ.get("FORGERYSEG_SUBMISSION_THRESHOLD", "0.5"))
+
+submissions_from_model = None
+if USE_MODEL_SUBMISSION:
+    if "model" not in globals():
+        raise RuntimeError("Defina a variável `model` antes de ativar FORGERYSEG_USE_MODEL_SUBMISSION=1.")
+
+    annotations = []
+    for img_path in test_images:
+        # carregue e processe a imagem
+        img = np.array(Image.open(img_path)) / 255.0
+        # modelo deve gerar um mapa de probabilidade ou máscara
+        pred_prob = model.predict(img[None])[0]  # exemplo
+        binary_mask = (pred_prob > THRESHOLD).astype(np.uint8)
+        if binary_mask.sum() == 0:
+            annotations.append("authentic")
+        else:
+            annotations.append(rle_encode(binary_mask))
+
+    submissions_from_model = pd.DataFrame(
+        {
+            "case_id": [p.stem for p in test_images],
+            "annotation": annotations,
+        }
+    )
+
+    submissions_from_model.head()
+
+# %%
+# Fase 4 — Célula 12: Salvar submission.csv (roteiro oficial)
+RUN_SUBMISSION_SIMPLE = _env_bool("FORGERYSEG_RUN_SUBMISSION_SIMPLE", default=is_kaggle())
+print("RUN_SUBMISSION_SIMPLE:", RUN_SUBMISSION_SIMPLE)
+
+if RUN_SUBMISSION_SIMPLE:
+    submissions_to_save = submissions_from_model if USE_MODEL_SUBMISSION else submissions
+    submission_path = "/kaggle/working/submission.csv" if is_kaggle() else "submission.csv"
+    pd.DataFrame(submissions_to_save).to_csv(submission_path, index=False)
+    print("Wrote:", submission_path)
+
+# %% [markdown]
+# ## Fase 4b — Submissão via `submit_ensemble.py` (opcional)
+#
+# - Usa os checkpoints em `outputs/models_seg/...`.
+# - Desabilita o gate de classificação (`--cls-skip-threshold 0.0`) para evitar falso-negativos anularem a segmentação.
+#
+# Para desligar/ligar: `FORGERYSEG_RUN_SUBMISSION_SCRIPT=0|1`.
+
+# %%
+# Fase 4b — Célula 13: Gerar submission.csv via script (opcional)
+RUN_SUBMISSION_SCRIPT = _env_bool("FORGERYSEG_RUN_SUBMISSION_SCRIPT", default=False)
+print("RUN_SUBMISSION_SCRIPT:", RUN_SUBMISSION_SCRIPT)
+
+
+def output_root() -> Path:
+    return Path("/kaggle/working") if is_kaggle() else Path(".").resolve()
+
+
+def _find_submit_ensemble_script() -> Path:
+    candidates: list[Path] = []
+    if PROJECT_ROOT is not None:
+        candidates.append(PROJECT_ROOT / "scripts" / "submit_ensemble.py")
+    candidates.append(Path("scripts/submit_ensemble.py").resolve())
+
+    if is_kaggle():
+        ki = Path("/kaggle/input")
+        if ki.exists():
+            for ds in sorted(ki.glob("*")):
+                for base in (ds, ds / "recodai_bundle"):
+                    p = base / "scripts" / "submit_ensemble.py"
+                    if p.exists():
+                        candidates.append(p)
+
+    for p in candidates:
+        if p.exists():
+            return p
+    raise FileNotFoundError(
+        "Não encontrei `scripts/submit_ensemble.py`.\n"
+        "- Solução (Kaggle): anexe o dataset do repositório (bundle) contendo `scripts/`.\n"
+        "- Solução (local): rode a partir do root do repo (onde existe `scripts/`)."
+    )
+
+
+def _find_infer_cfg_path() -> Path | None:
+    candidates: list[Path] = []
+    if PROJECT_ROOT is not None:
+        candidates.append(PROJECT_ROOT / "configs" / "infer_ensemble.json")
+    candidates.append(Path("configs/infer_ensemble.json").resolve())
+
+    if is_kaggle():
+        ki = Path("/kaggle/input")
+        if ki.exists():
+            for ds in sorted(ki.glob("*")):
+                for base in (ds, ds / "recodai_bundle"):
+                    p = base / "configs" / "infer_ensemble.json"
+                    if p.exists():
+                        candidates.append(p)
+
+    for p in candidates:
+        if p.exists():
+            return p
+    return None
+
+
+if RUN_SUBMISSION_SCRIPT:
+    submit_script = _find_submit_ensemble_script()
+    infer_cfg_path = _find_infer_cfg_path()
+
+    submission_path = output_root() / "submission.csv"
+    local_models_dir = output_root() / "outputs" / "models_seg"
+
+    cmd = [
+        sys.executable,
+        str(submit_script),
+        "--data-root",
+        str(DATA_ROOT),
+        "--out-csv",
+        str(submission_path),
+        "--cls-skip-threshold",
+        "0.0",  # desabilita o gate de classificação (evita falso-negativo anular a segmentação)
+    ]
+    if any(local_models_dir.glob("*/*/best.pt")):
+        cmd += ["--models-dir", str(local_models_dir)]
+    if infer_cfg_path is not None:
+        cmd += ["--config", str(infer_cfg_path)]
+
+    print("[SUBMISSION] script:", submit_script)
+    if infer_cfg_path is not None:
+        print("[SUBMISSION] cfg:", infer_cfg_path)
+    print("[SUBMISSION] running:", " ".join(cmd))
+    subprocess.check_call(cmd)
+    print("[SUBMISSION] wrote:", submission_path)
+else:
+    print("[SUBMISSION] RUN_SUBMISSION_SCRIPT=False (pulando).")

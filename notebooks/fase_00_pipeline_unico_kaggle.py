@@ -71,6 +71,12 @@ DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 if DEVICE == "cuda":
     torch.backends.cudnn.benchmark = True
 
+# Em notebooks, multiprocessing pode gerar warnings/instabilidade; use 0 por padrão.
+NUM_WORKERS = int(os.environ.get("FORGERYSEG_NUM_WORKERS", "0"))
+if NUM_WORKERS > 0:
+    print("[WARN] FORGERYSEG_NUM_WORKERS>0 em notebooks pode gerar warnings/instabilidade.")
+print("NUM_WORKERS:", NUM_WORKERS)
+
 print("python:", sys.version.split()[0])
 print("numpy:", np.__version__)
 print("torch:", torch.__version__)

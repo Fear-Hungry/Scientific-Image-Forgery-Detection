@@ -430,106 +430,110 @@ class ClsDataset(Dataset):
 
 
 if RUN_TRAIN_CLS:
-    ds_cls_train = ClsDataset([train_samples[i] for i in train_idx.tolist()], build_transform(train=True))
-    ds_cls_val = ClsDataset([train_samples[i] for i in val_idx.tolist()], build_transform(train=False))
-
-    num_workers = NUM_WORKERS
-    dl_cls_train = DataLoader(ds_cls_train, batch_size=CLS_BATCH_SIZE, shuffle=True, num_workers=num_workers, pin_memory=(DEVICE == "cuda"), drop_last=True)
-    dl_cls_val = DataLoader(ds_cls_val, batch_size=CLS_BATCH_SIZE, shuffle=False, num_workers=num_workers, pin_memory=(DEVICE == "cuda"), drop_last=False)
-
     try:
-        cls_model = build_classifier(model_name=CLS_MODEL_NAME, pretrained=CLS_PRETRAINED, num_classes=1).to(DEVICE)
-    except Exception:
-        if CLS_PRETRAINED:
-            print("[CLS] falha ao carregar pesos pré-treinados; fallback para pretrained=False.")
-            traceback.print_exc()
-            cls_model = build_classifier(model_name=CLS_MODEL_NAME, pretrained=False, num_classes=1).to(DEVICE)
-        else:
-            raise
-    pos_weight = torch.tensor(compute_pos_weight(train_labels[train_idx]), dtype=torch.float32, device=DEVICE)
-    cls_criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
-    cls_optimizer = torch.optim.AdamW(cls_model.parameters(), lr=CLS_LR, weight_decay=CLS_WEIGHT_DECAY)
-    cls_scaler = torch.cuda.amp.GradScaler(enabled=(DEVICE == "cuda"))
-
-    @torch.no_grad()
-    def cls_eval() -> dict:
-        cls_model.eval()
-        losses = []
-        logits_all = []
-        y_all = []
-        for x, yb in tqdm(dl_cls_val, desc="cls val", leave=False):
-            x = x.to(DEVICE, non_blocking=True)
-            yb = yb.to(DEVICE, non_blocking=True)
-            logits = cls_model(x).view(-1, 1)
-            loss = cls_criterion(logits, yb)
-            losses.append(float(loss.item()))
-            logits_all.append(logits.detach().cpu().numpy())
-            y_all.append(yb.detach().cpu().numpy())
-        logits_np = np.concatenate(logits_all, axis=0).reshape(-1)
-        y_np = np.concatenate(y_all, axis=0).reshape(-1)
-        probs = 1.0 / (1.0 + np.exp(-logits_np))
-        acc = float(((probs >= 0.5).astype(np.int64) == y_np.astype(np.int64)).mean())
-        out = {"loss": float(np.mean(losses)) if losses else float("nan"), "acc@0.5": acc}
+        ds_cls_train = ClsDataset([train_samples[i] for i in train_idx.tolist()], build_transform(train=True))
+        ds_cls_val = ClsDataset([train_samples[i] for i in val_idx.tolist()], build_transform(train=False))
+    
+        num_workers = NUM_WORKERS
+        dl_cls_train = DataLoader(ds_cls_train, batch_size=CLS_BATCH_SIZE, shuffle=True, num_workers=num_workers, pin_memory=(DEVICE == "cuda"), drop_last=True)
+        dl_cls_val = DataLoader(ds_cls_val, batch_size=CLS_BATCH_SIZE, shuffle=False, num_workers=num_workers, pin_memory=(DEVICE == "cuda"), drop_last=False)
+    
         try:
-            from sklearn.metrics import roc_auc_score
-
-            out["auc"] = float(roc_auc_score(y_np, probs))
+            cls_model = build_classifier(model_name=CLS_MODEL_NAME, pretrained=CLS_PRETRAINED, num_classes=1).to(DEVICE)
         except Exception:
-            traceback.print_exc()
-        return out
-
-    def cls_train_one_epoch() -> float:
-        cls_model.train()
-        losses = []
-        for x, yb in tqdm(dl_cls_train, desc="cls train", leave=False):
-            x = x.to(DEVICE, non_blocking=True)
-            yb = yb.to(DEVICE, non_blocking=True)
-            cls_optimizer.zero_grad(set_to_none=True)
-            with torch.cuda.amp.autocast(enabled=(DEVICE == "cuda")):
+            if CLS_PRETRAINED:
+                print("[CLS] falha ao carregar pesos pré-treinados; fallback para pretrained=False.")
+                traceback.print_exc()
+                cls_model = build_classifier(model_name=CLS_MODEL_NAME, pretrained=False, num_classes=1).to(DEVICE)
+            else:
+                raise
+        pos_weight = torch.tensor(compute_pos_weight(train_labels[train_idx]), dtype=torch.float32, device=DEVICE)
+        cls_criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
+        cls_optimizer = torch.optim.AdamW(cls_model.parameters(), lr=CLS_LR, weight_decay=CLS_WEIGHT_DECAY)
+        cls_scaler = torch.cuda.amp.GradScaler(enabled=(DEVICE == "cuda"))
+    
+        @torch.no_grad()
+        def cls_eval() -> dict:
+            cls_model.eval()
+            losses = []
+            logits_all = []
+            y_all = []
+            for x, yb in tqdm(dl_cls_val, desc="cls val", leave=False):
+                x = x.to(DEVICE, non_blocking=True)
+                yb = yb.to(DEVICE, non_blocking=True)
                 logits = cls_model(x).view(-1, 1)
                 loss = cls_criterion(logits, yb)
-            cls_scaler.scale(loss).backward()
-            cls_scaler.step(cls_optimizer)
-            cls_scaler.update()
-            losses.append(float(loss.item()))
-        return float(np.mean(losses)) if losses else float("nan")
-
-    def output_root() -> Path:
-        return Path("/kaggle/working") if is_kaggle() else Path(".").resolve()
-
-    cls_save_dir = output_root() / "outputs" / "models_cls" / f"fold_{int(FOLD)}"
-    cls_save_dir.mkdir(parents=True, exist_ok=True)
-    cls_best_path = cls_save_dir / "best.pt"
-
-    best_score = -1.0
-    best_epoch = 0
-    for epoch in range(1, int(CLS_EPOCHS) + 1):
-        tr_loss = cls_train_one_epoch()
-        val = cls_eval()
-        score = float(val.get("auc", -val["loss"]))
-        print(f"[CLS] epoch {epoch:02d}/{CLS_EPOCHS} | train_loss={tr_loss:.4f} | val={val}")
-        if score > best_score:
-            best_score = score
-            best_epoch = int(epoch)
-            ckpt = {
-                "model_state": cls_model.state_dict(),
-                "config": {
-                    "backend": "timm",
-                    "model_name": CLS_MODEL_NAME,
-                    "image_size": int(CLS_IMAGE_SIZE),
-                    "pretrained": bool(CLS_PRETRAINED),
-                    "fold": int(FOLD),
-                    "seed": int(SEED),
-                },
-                "score": float(best_score),
-            }
-            torch.save(ckpt, cls_best_path)
-            print("[CLS] saved best ->", cls_best_path)
-        if CLS_PATIENCE and best_epoch and (int(epoch) - int(best_epoch) >= int(CLS_PATIENCE)):
-            print(f"[CLS] early stopping: sem melhora por {CLS_PATIENCE} épocas (best_epoch={best_epoch}).")
-            break
-
-    print("[CLS] done. best score:", best_score)
+                losses.append(float(loss.item()))
+                logits_all.append(logits.detach().cpu().numpy())
+                y_all.append(yb.detach().cpu().numpy())
+            logits_np = np.concatenate(logits_all, axis=0).reshape(-1)
+            y_np = np.concatenate(y_all, axis=0).reshape(-1)
+            probs = 1.0 / (1.0 + np.exp(-logits_np))
+            acc = float(((probs >= 0.5).astype(np.int64) == y_np.astype(np.int64)).mean())
+            out = {"loss": float(np.mean(losses)) if losses else float("nan"), "acc@0.5": acc}
+            try:
+                from sklearn.metrics import roc_auc_score
+    
+                out["auc"] = float(roc_auc_score(y_np, probs))
+            except Exception:
+                traceback.print_exc()
+            return out
+    
+        def cls_train_one_epoch() -> float:
+            cls_model.train()
+            losses = []
+            for x, yb in tqdm(dl_cls_train, desc="cls train", leave=False):
+                x = x.to(DEVICE, non_blocking=True)
+                yb = yb.to(DEVICE, non_blocking=True)
+                cls_optimizer.zero_grad(set_to_none=True)
+                with torch.cuda.amp.autocast(enabled=(DEVICE == "cuda")):
+                    logits = cls_model(x).view(-1, 1)
+                    loss = cls_criterion(logits, yb)
+                cls_scaler.scale(loss).backward()
+                cls_scaler.step(cls_optimizer)
+                cls_scaler.update()
+                losses.append(float(loss.item()))
+            return float(np.mean(losses)) if losses else float("nan")
+    
+        def output_root() -> Path:
+            return Path("/kaggle/working") if is_kaggle() else Path(".").resolve()
+    
+        cls_save_dir = output_root() / "outputs" / "models_cls" / f"fold_{int(FOLD)}"
+        cls_save_dir.mkdir(parents=True, exist_ok=True)
+        cls_best_path = cls_save_dir / "best.pt"
+    
+        best_score = -1.0
+        best_epoch = 0
+        for epoch in range(1, int(CLS_EPOCHS) + 1):
+            tr_loss = cls_train_one_epoch()
+            val = cls_eval()
+            score = float(val.get("auc", -val["loss"]))
+            print(f"[CLS] epoch {epoch:02d}/{CLS_EPOCHS} | train_loss={tr_loss:.4f} | val={val}")
+            if score > best_score:
+                best_score = score
+                best_epoch = int(epoch)
+                ckpt = {
+                    "model_state": cls_model.state_dict(),
+                    "config": {
+                        "backend": "timm",
+                        "model_name": CLS_MODEL_NAME,
+                        "image_size": int(CLS_IMAGE_SIZE),
+                        "pretrained": bool(CLS_PRETRAINED),
+                        "fold": int(FOLD),
+                        "seed": int(SEED),
+                    },
+                    "score": float(best_score),
+                }
+                torch.save(ckpt, cls_best_path)
+                print("[CLS] saved best ->", cls_best_path)
+            if CLS_PATIENCE and best_epoch and (int(epoch) - int(best_epoch) >= int(CLS_PATIENCE)):
+                print(f"[CLS] early stopping: sem melhora por {CLS_PATIENCE} épocas (best_epoch={best_epoch}).")
+                break
+    
+        print("[CLS] done. best score:", best_score)
+    except Exception:
+        print("[CLS] erro no treino; seguindo para próxima fase.")
+        traceback.print_exc()
 else:
     print("[CLS] RUN_TRAIN_CLS=False (pulando).")
 
@@ -569,108 +573,112 @@ if FAST_TRAIN:
         ]
 
 if RUN_TRAIN_SEG:
-    train_aug = get_train_augment(patch_size=SEG_PATCH_SIZE, copy_move_prob=SEG_COPY_MOVE_PROB)
-    val_aug = get_val_augment()
-
-    ds_seg_train = PatchDataset([train_samples[i] for i in train_idx.tolist()], patch_size=SEG_PATCH_SIZE, train=True, augment=train_aug, positive_prob=0.7, seed=SEED)
-    ds_seg_val = PatchDataset([train_samples[i] for i in val_idx.tolist()], patch_size=SEG_PATCH_SIZE, train=False, augment=val_aug, seed=SEED)
-
-    num_workers = NUM_WORKERS
-    dl_seg_train = DataLoader(ds_seg_train, batch_size=SEG_BATCH_SIZE, shuffle=True, num_workers=num_workers, pin_memory=(DEVICE == "cuda"), drop_last=True)
-    dl_seg_val = DataLoader(ds_seg_val, batch_size=SEG_BATCH_SIZE, shuffle=False, num_workers=num_workers, pin_memory=(DEVICE == "cuda"), drop_last=False)
-
-    def output_root() -> Path:
-        return Path("/kaggle/working") if is_kaggle() else Path(".").resolve()
-
-    use_amp = (DEVICE == "cuda")
-
-    def build_seg_model(arch: str, encoder_name: str, encoder_weights: str | None) -> nn.Module:
-        arch = str(arch).lower()
-        if arch == "unet":
-            return builders.build_unet(
-                encoder_name=encoder_name,
-                encoder_weights=encoder_weights,
-                classes=1,
-                strict_weights=True,
-            )
-        if arch in {"unetplusplus", "unetpp"}:
-            return builders.build_unetplusplus(
-                encoder_name=encoder_name,
-                encoder_weights=encoder_weights,
-                classes=1,
-                strict_weights=True,
-            )
-        if arch in {"deeplabv3plus", "deeplabv3+", "deeplabv3p"}:
-            return builders.build_deeplabv3plus(
-                encoder_name=encoder_name,
-                encoder_weights=encoder_weights,
-                classes=1,
-                strict_weights=True,
-            )
-        if arch in {"segformer", "mit"}:
-            return builders.build_segformer(
-                encoder_name=encoder_name,
-                encoder_weights=encoder_weights,
-                classes=1,
-                strict_weights=True,
-            )
-        raise ValueError(f"SEG arch inválida: {arch!r}")
-
-    for spec in SEG_TRAIN_SPECS:
-        model_id = str(spec["model_id"])
-        arch = str(spec.get("arch", "unetplusplus"))
-        encoder_name = str(spec.get("encoder_name", "efficientnet-b4"))
-        encoder_weights: str | None = spec.get("encoder_weights", SEG_ENCODER_WEIGHTS)
-
-        try:
-            seg_model = build_seg_model(arch, encoder_name, encoder_weights).to(DEVICE)
-        except Exception:
-            if encoder_weights is not None:
-                print(f"[SEG] falha ao carregar encoder_weights={encoder_weights!r}; fallback para None.")
-                traceback.print_exc()
-                encoder_weights = None
+    try:
+        train_aug = get_train_augment(patch_size=SEG_PATCH_SIZE, copy_move_prob=SEG_COPY_MOVE_PROB)
+        val_aug = get_val_augment()
+    
+        ds_seg_train = PatchDataset([train_samples[i] for i in train_idx.tolist()], patch_size=SEG_PATCH_SIZE, train=True, augment=train_aug, positive_prob=0.7, seed=SEED)
+        ds_seg_val = PatchDataset([train_samples[i] for i in val_idx.tolist()], patch_size=SEG_PATCH_SIZE, train=False, augment=val_aug, seed=SEED)
+    
+        num_workers = NUM_WORKERS
+        dl_seg_train = DataLoader(ds_seg_train, batch_size=SEG_BATCH_SIZE, shuffle=True, num_workers=num_workers, pin_memory=(DEVICE == "cuda"), drop_last=True)
+        dl_seg_val = DataLoader(ds_seg_val, batch_size=SEG_BATCH_SIZE, shuffle=False, num_workers=num_workers, pin_memory=(DEVICE == "cuda"), drop_last=False)
+    
+        def output_root() -> Path:
+            return Path("/kaggle/working") if is_kaggle() else Path(".").resolve()
+    
+        use_amp = (DEVICE == "cuda")
+    
+        def build_seg_model(arch: str, encoder_name: str, encoder_weights: str | None) -> nn.Module:
+            arch = str(arch).lower()
+            if arch == "unet":
+                return builders.build_unet(
+                    encoder_name=encoder_name,
+                    encoder_weights=encoder_weights,
+                    classes=1,
+                    strict_weights=True,
+                )
+            if arch in {"unetplusplus", "unetpp"}:
+                return builders.build_unetplusplus(
+                    encoder_name=encoder_name,
+                    encoder_weights=encoder_weights,
+                    classes=1,
+                    strict_weights=True,
+                )
+            if arch in {"deeplabv3plus", "deeplabv3+", "deeplabv3p"}:
+                return builders.build_deeplabv3plus(
+                    encoder_name=encoder_name,
+                    encoder_weights=encoder_weights,
+                    classes=1,
+                    strict_weights=True,
+                )
+            if arch in {"segformer", "mit"}:
+                return builders.build_segformer(
+                    encoder_name=encoder_name,
+                    encoder_weights=encoder_weights,
+                    classes=1,
+                    strict_weights=True,
+                )
+            raise ValueError(f"SEG arch inválida: {arch!r}")
+    
+        for spec in SEG_TRAIN_SPECS:
+            model_id = str(spec["model_id"])
+            arch = str(spec.get("arch", "unetplusplus"))
+            encoder_name = str(spec.get("encoder_name", "efficientnet-b4"))
+            encoder_weights: str | None = spec.get("encoder_weights", SEG_ENCODER_WEIGHTS)
+    
+            try:
                 seg_model = build_seg_model(arch, encoder_name, encoder_weights).to(DEVICE)
-            else:
-                raise
-
-        seg_criterion = BCETverskyLoss(alpha=0.7, beta=0.3, tversky_weight=1.0)
-        seg_optimizer = torch.optim.AdamW(seg_model.parameters(), lr=SEG_LR, weight_decay=SEG_WEIGHT_DECAY)
-
-        seg_save_dir = output_root() / "outputs" / "models_seg" / model_id / f"fold_{int(FOLD)}"
-        seg_save_dir.mkdir(parents=True, exist_ok=True)
-        seg_best_path = seg_save_dir / "best.pt"
-
-        best_dice = -1.0
-        best_epoch = 0
-        for epoch in range(1, int(SEG_EPOCHS) + 1):
-            tr = train_one_epoch(seg_model, dl_seg_train, seg_criterion, seg_optimizer, DEVICE, use_amp=use_amp, progress=True, desc=f"seg train ({model_id})")
-            val_stats, val_dice = validate(seg_model, dl_seg_val, seg_criterion, DEVICE, progress=True, desc=f"seg val ({model_id})")
-            print(f"[SEG {model_id}] epoch {epoch:02d}/{SEG_EPOCHS} | train_loss={tr.loss:.4f} | val_loss={val_stats.loss:.4f} | dice@0.5={val_dice:.4f}")
-            if float(val_dice) > best_dice:
-                best_dice = float(val_dice)
-                best_epoch = int(epoch)
-                ckpt = {
-                    "model_state": seg_model.state_dict(),
-                    "config": {
-                        "backend": "smp",
-                        "arch": arch,
-                        "encoder_name": encoder_name,
-                        "encoder_weights": encoder_weights,
-                        "classes": 1,
-                        "model_id": model_id,
-                        "patch_size": int(SEG_PATCH_SIZE),
-                        "fold": int(FOLD),
-                        "seed": int(SEED),
-                    },
-                    "score": float(best_dice),
-                }
-                torch.save(ckpt, seg_best_path)
-                print("[SEG] saved best ->", seg_best_path)
-            if SEG_PATIENCE and best_epoch and (int(epoch) - int(best_epoch) >= int(SEG_PATIENCE)):
-                print(f"[SEG {model_id}] early stopping: sem melhora por {SEG_PATIENCE} épocas (best_epoch={best_epoch}).")
-                break
-
-        print(f"[SEG {model_id}] done. best dice:", best_dice)
+            except Exception:
+                if encoder_weights is not None:
+                    print(f"[SEG] falha ao carregar encoder_weights={encoder_weights!r}; fallback para None.")
+                    traceback.print_exc()
+                    encoder_weights = None
+                    seg_model = build_seg_model(arch, encoder_name, encoder_weights).to(DEVICE)
+                else:
+                    raise
+    
+            seg_criterion = BCETverskyLoss(alpha=0.7, beta=0.3, tversky_weight=1.0)
+            seg_optimizer = torch.optim.AdamW(seg_model.parameters(), lr=SEG_LR, weight_decay=SEG_WEIGHT_DECAY)
+    
+            seg_save_dir = output_root() / "outputs" / "models_seg" / model_id / f"fold_{int(FOLD)}"
+            seg_save_dir.mkdir(parents=True, exist_ok=True)
+            seg_best_path = seg_save_dir / "best.pt"
+    
+            best_dice = -1.0
+            best_epoch = 0
+            for epoch in range(1, int(SEG_EPOCHS) + 1):
+                tr = train_one_epoch(seg_model, dl_seg_train, seg_criterion, seg_optimizer, DEVICE, use_amp=use_amp, progress=True, desc=f"seg train ({model_id})")
+                val_stats, val_dice = validate(seg_model, dl_seg_val, seg_criterion, DEVICE, progress=True, desc=f"seg val ({model_id})")
+                print(f"[SEG {model_id}] epoch {epoch:02d}/{SEG_EPOCHS} | train_loss={tr.loss:.4f} | val_loss={val_stats.loss:.4f} | dice@0.5={val_dice:.4f}")
+                if float(val_dice) > best_dice:
+                    best_dice = float(val_dice)
+                    best_epoch = int(epoch)
+                    ckpt = {
+                        "model_state": seg_model.state_dict(),
+                        "config": {
+                            "backend": "smp",
+                            "arch": arch,
+                            "encoder_name": encoder_name,
+                            "encoder_weights": encoder_weights,
+                            "classes": 1,
+                            "model_id": model_id,
+                            "patch_size": int(SEG_PATCH_SIZE),
+                            "fold": int(FOLD),
+                            "seed": int(SEED),
+                        },
+                        "score": float(best_dice),
+                    }
+                    torch.save(ckpt, seg_best_path)
+                    print("[SEG] saved best ->", seg_best_path)
+                if SEG_PATIENCE and best_epoch and (int(epoch) - int(best_epoch) >= int(SEG_PATIENCE)):
+                    print(f"[SEG {model_id}] early stopping: sem melhora por {SEG_PATIENCE} épocas (best_epoch={best_epoch}).")
+                    break
+    
+            print(f"[SEG {model_id}] done. best dice:", best_dice)
+    except Exception:
+        print("[SEG] erro no treino; seguindo para submissão.")
+        traceback.print_exc()
 else:
     print("[SEG] RUN_TRAIN_SEG=False (pulando).")
 

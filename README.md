@@ -108,7 +108,7 @@ data/
 
 Notebook pronto para uso no Kaggle (internet OFF no submit). Importa o código do projeto em `src/forgeryseg/`.
 
-- `notebooks/fase_00_pipeline_unico_kaggle.ipynb`: **treinamento** (setup → treino opcional). Para inferência/submissão, use os scripts em `scripts/`.
+- `notebooks/fase_00_pipeline_unico_kaggle.ipynb`: setup → treino opcional → **gera `submission.csv`** (padrão ON no Kaggle).
 
 Fluxo típico (Kaggle):
 

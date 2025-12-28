@@ -48,6 +48,8 @@ import torch
 import torch.nn as nn
 
 warnings.simplefilter("default")
+warnings.filterwarnings("ignore", category=FutureWarning)
+warnings.filterwarnings("ignore", category=ResourceWarning)
 os.environ.setdefault("NO_ALBUMENTATIONS_UPDATE", "1")
 
 
@@ -552,7 +554,7 @@ if RUN_TRAIN_SEG:
     ds_seg_train = PatchDataset([train_samples[i] for i in train_idx.tolist()], patch_size=SEG_PATCH_SIZE, train=True, augment=train_aug, positive_prob=0.7, seed=SEED)
     ds_seg_val = PatchDataset([train_samples[i] for i in val_idx.tolist()], patch_size=SEG_PATCH_SIZE, train=False, augment=val_aug, seed=SEED)
 
-    num_workers = 2 if is_kaggle() else 0
+    num_workers = NUM_WORKERS
     dl_seg_train = DataLoader(ds_seg_train, batch_size=SEG_BATCH_SIZE, shuffle=True, num_workers=num_workers, pin_memory=(DEVICE == "cuda"), drop_last=True)
     dl_seg_val = DataLoader(ds_seg_val, batch_size=SEG_BATCH_SIZE, shuffle=False, num_workers=num_workers, pin_memory=(DEVICE == "cuda"), drop_last=False)
 

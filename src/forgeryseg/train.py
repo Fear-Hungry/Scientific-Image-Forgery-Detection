@@ -54,6 +54,18 @@ def _autocast_ctx(device: str, enabled: bool):
     return torch.cuda.amp.autocast(enabled=enabled)
 
 
+def _grad_scaler(device: str, enabled: bool):
+    """
+    Compatibility helper for AMP GradScaler across torch versions.
+
+    `torch.cuda.amp.GradScaler` is deprecated in recent torch; prefer `torch.amp.GradScaler`.
+    """
+    if hasattr(torch, "amp") and hasattr(torch.amp, "GradScaler"):
+        device_type = "cuda" if str(device).startswith("cuda") else "cpu"
+        return torch.amp.GradScaler(device_type, enabled=enabled)
+    return torch.cuda.amp.GradScaler(enabled=enabled)
+
+
 @torch.no_grad()
 def _batch_dice(logits: torch.Tensor, targets: torch.Tensor, threshold: float = 0.5) -> torch.Tensor:
     probs = torch.sigmoid(logits)
@@ -79,7 +91,7 @@ def train_one_epoch(
     model.train()
     _ensure_no_empty_parameters(model)
     total_loss = 0.0
-    scaler = torch.cuda.amp.GradScaler(enabled=use_amp)
+    scaler = _grad_scaler(device, enabled=use_amp)
 
     for images, masks in _maybe_tqdm(loader, progress, desc):
         images = images.to(device)

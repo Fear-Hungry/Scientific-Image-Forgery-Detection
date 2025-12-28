@@ -255,7 +255,12 @@ def main() -> None:
     parser.add_argument("--closing-iters", type=int, default=1, help="Morphological closing iterations")
     parser.add_argument("--fill-holes", action="store_true", help="Fill holes in binary mask")
     parser.add_argument("--median", type=int, default=0, help="Median smoothing kernel size (0=disabled, odd>=3)")
-    parser.add_argument("--cls-skip-threshold", type=float, default=0.10, help="Skip seg when p_forged < this")
+    parser.add_argument(
+        "--cls-skip-threshold",
+        type=float,
+        default=0.0,
+        help="Skip seg when p_forged < this (<=0 disables the gate)",
+    )
     parser.add_argument("--device", default="", help="Device override")
     parser.add_argument("--limit", type=int, default=0, help="Limit number of test samples (debug)")
     args = parser.parse_args()
@@ -314,7 +319,8 @@ def main() -> None:
     closing_iters = int(cfg.get("closing_iters", args.closing_iters))
     fill_holes = bool(cfg.get("fill_holes", args.fill_holes))
     median = int(cfg.get("median", args.median))
-    cls_skip_threshold = float(cfg.get("cls_skip_threshold", args.cls_skip_threshold))
+    cfg_cls_skip = cfg.get("cls_skip_threshold", args.cls_skip_threshold)
+    cls_skip_threshold = float(cfg_cls_skip) if cfg_cls_skip is not None else 0.0
     top_k_per_model = int(cfg.get("top_k_per_model", args.top_k_per_model))
 
     seg_entries = _load_seg_models(
@@ -327,8 +333,12 @@ def main() -> None:
 
     cls_models: list[nn.Module] = []
     cls_image_size = 0
-    if cls_models_dir is not None and cls_models_dir.exists():
+    if float(cls_skip_threshold) <= 0.0:
+        print("[CLS] gate disabled (cls_skip_threshold<=0).")
+    elif cls_models_dir is not None and cls_models_dir.exists():
         cls_models, cls_image_size = _load_cls_models(cls_models_dir, device)
+    else:
+        print("[CLS] gate enabled but no classifier checkpoints found; running segmentation for all samples.")
 
     with out_path.open("w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=["case_id", "annotation"])
@@ -336,7 +346,7 @@ def main() -> None:
 
         for s in _maybe_tqdm(samples, enabled=True, desc="infer"):
             img = load_image(s.image_path)
-            if cls_models:
+            if cls_models and float(cls_skip_threshold) > 0.0:
                 p_forged = predict_prob_forged(cls_models, img, device, cls_image_size)
                 if float(p_forged) < float(cls_skip_threshold):
                     writer.writerow({"case_id": s.case_id, "annotation": AUTHENTIC_LABEL})

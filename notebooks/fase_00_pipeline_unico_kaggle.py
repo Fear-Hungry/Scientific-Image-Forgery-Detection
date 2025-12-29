@@ -249,7 +249,7 @@ from torch.utils.data import DataLoader, Dataset  # noqa: E402
 from forgeryseg.augment import get_train_augment, get_val_augment  # noqa: E402
 from forgeryseg.dataset import PatchDataset, build_train_index  # noqa: E402
 from forgeryseg.losses import BCETverskyLoss  # noqa: E402
-from forgeryseg.models import builders  # noqa: E402
+from forgeryseg.models import builders, dinov2  # noqa: E402
 from forgeryseg.models.classifier import build_classifier, compute_pos_weight  # noqa: E402
 from forgeryseg.offline import configure_cache_dirs  # noqa: E402
 from forgeryseg.train import train_one_epoch, validate  # noqa: E402
@@ -399,7 +399,15 @@ IMAGENET_MEAN = (0.485, 0.456, 0.406)
 IMAGENET_STD = (0.229, 0.224, 0.225)
 
 CLS_MODEL_NAME = "tf_efficientnet_b4_ns"
-CLS_IMAGE_SIZE = 384
+CLS_BACKEND = os.environ.get("FORGERYSEG_CLS_BACKEND", "timm").strip().lower()
+CLS_HF_MODEL_ID = os.environ.get("FORGERYSEG_CLS_HF_MODEL_ID", "metaresearch/dinov2")
+CLS_FREEZE_ENCODER = _env_bool("FORGERYSEG_CLS_FREEZE_ENCODER", default=True)
+CLS_LOCAL_FILES_ONLY = _env_bool("FORGERYSEG_CLS_LOCAL_FILES_ONLY", default=OFFLINE_NO_DOWNLOAD)
+CLS_CLASSIFIER_HIDDEN = int(os.environ.get("FORGERYSEG_CLS_HIDDEN", "0"))
+CLS_CLASSIFIER_DROPOUT = float(os.environ.get("FORGERYSEG_CLS_DROPOUT", "0.1"))
+CLS_USE_CLS_TOKEN = _env_bool("FORGERYSEG_CLS_USE_CLS_TOKEN", default=True)
+_cls_default_size = "392" if CLS_BACKEND in {"dinov2", "hf"} else "384"
+CLS_IMAGE_SIZE = int(os.environ.get("FORGERYSEG_CLS_IMAGE_SIZE", _cls_default_size))
 CLS_BATCH_SIZE = 32
 CLS_EPOCHS = int(os.environ.get("FORGERYSEG_CLS_EPOCHS", "15"))
 CLS_PATIENCE = 3
@@ -411,7 +419,7 @@ CLS_SKIP_THRESHOLD = float(os.environ.get("FORGERYSEG_CLS_SKIP_THRESHOLD", "0.30
 CLS_USE_SCHEDULER = _env_bool("FORGERYSEG_CLS_USE_SCHEDULER", default=True)
 CLS_LR_SCHED_PATIENCE = int(os.environ.get("FORGERYSEG_CLS_LR_SCHED_PATIENCE", "2"))
 CLS_LR_SCHED_FACTOR = float(os.environ.get("FORGERYSEG_CLS_LR_SCHED_FACTOR", "0.5"))
-# Pesos pré-treinados ajudam; em Kaggle offline usamos cache local e fazemos fallback se faltar.
+# Pesos pré-treinados ajudam; em Kaggle offline use cache local (falha se faltar).
 CLS_PRETRAINED = _env_bool("FORGERYSEG_CLS_PRETRAINED", default=True)
 
 
@@ -446,120 +454,136 @@ class ClsDataset(Dataset):
 
 
 if RUN_TRAIN_CLS:
-    try:
-        ds_cls_train = ClsDataset([train_samples[i] for i in train_idx.tolist()], build_transform(train=True))
-        ds_cls_val = ClsDataset([train_samples[i] for i in val_idx.tolist()], build_transform(train=False))
-    
-        num_workers = NUM_WORKERS
-        dl_cls_train = DataLoader(ds_cls_train, batch_size=CLS_BATCH_SIZE, shuffle=True, num_workers=num_workers, pin_memory=(DEVICE == "cuda"), drop_last=True)
-        dl_cls_val = DataLoader(ds_cls_val, batch_size=CLS_BATCH_SIZE, shuffle=False, num_workers=num_workers, pin_memory=(DEVICE == "cuda"), drop_last=False)
-    
+    ds_cls_train = ClsDataset([train_samples[i] for i in train_idx.tolist()], build_transform(train=True))
+    ds_cls_val = ClsDataset([train_samples[i] for i in val_idx.tolist()], build_transform(train=False))
+
+    num_workers = NUM_WORKERS
+    dl_cls_train = DataLoader(ds_cls_train, batch_size=CLS_BATCH_SIZE, shuffle=True, num_workers=num_workers, pin_memory=(DEVICE == "cuda"), drop_last=True)
+    dl_cls_val = DataLoader(ds_cls_val, batch_size=CLS_BATCH_SIZE, shuffle=False, num_workers=num_workers, pin_memory=(DEVICE == "cuda"), drop_last=False)
+
+    cls_kwargs = {}
+    if CLS_BACKEND in {"dinov2", "hf"}:
+        cls_kwargs = {
+            "hf_model_id": CLS_HF_MODEL_ID,
+            "local_files_only": CLS_LOCAL_FILES_ONLY,
+            "freeze_encoder": CLS_FREEZE_ENCODER,
+            "classifier_hidden": CLS_CLASSIFIER_HIDDEN,
+            "classifier_dropout": CLS_CLASSIFIER_DROPOUT,
+            "use_cls_token": CLS_USE_CLS_TOKEN,
+        }
+    cls_model = build_classifier(
+        model_name=CLS_MODEL_NAME,
+        pretrained=CLS_PRETRAINED,
+        num_classes=1,
+        backend=CLS_BACKEND,
+        **cls_kwargs,
+    ).to(DEVICE)
+    pos_weight = torch.tensor(compute_pos_weight(train_labels[train_idx]), dtype=torch.float32, device=DEVICE)
+    cls_criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
+    cls_optimizer = torch.optim.AdamW(cls_model.parameters(), lr=CLS_LR, weight_decay=CLS_WEIGHT_DECAY)
+    cls_scheduler = None
+    if CLS_USE_SCHEDULER:
+        cls_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+            cls_optimizer,
+            mode="min",
+            patience=int(CLS_LR_SCHED_PATIENCE),
+            factor=float(CLS_LR_SCHED_FACTOR),
+        )
+    cls_scaler = torch.cuda.amp.GradScaler(enabled=(DEVICE == "cuda"))
+
+    @torch.no_grad()
+    def cls_eval() -> dict:
+        cls_model.eval()
+        losses = []
+        logits_all = []
+        y_all = []
+        for x, yb in tqdm(dl_cls_val, desc="cls val", leave=False):
+            x = x.to(DEVICE, non_blocking=True)
+            yb = yb.to(DEVICE, non_blocking=True)
+            logits = cls_model(x).view(-1, 1)
+            loss = cls_criterion(logits, yb)
+            losses.append(float(loss.item()))
+            logits_all.append(logits.detach().cpu().numpy())
+            y_all.append(yb.detach().cpu().numpy())
+        logits_np = np.concatenate(logits_all, axis=0).reshape(-1)
+        y_np = np.concatenate(y_all, axis=0).reshape(-1)
+        probs = 1.0 / (1.0 + np.exp(-logits_np))
+        acc = float(((probs >= 0.5).astype(np.int64) == y_np.astype(np.int64)).mean())
+        out = {"loss": float(np.mean(losses)) if losses else float("nan"), "acc@0.5": acc}
         try:
-            cls_model = build_classifier(model_name=CLS_MODEL_NAME, pretrained=CLS_PRETRAINED, num_classes=1).to(DEVICE)
+            from sklearn.metrics import roc_auc_score
+
+            out["auc"] = float(roc_auc_score(y_np, probs))
         except Exception:
-            if CLS_PRETRAINED:
-                print("[CLS] falha ao carregar pesos pré-treinados; fallback para pretrained=False.")
-                traceback.print_exc()
-                cls_model = build_classifier(model_name=CLS_MODEL_NAME, pretrained=False, num_classes=1).to(DEVICE)
-            else:
-                raise
-        pos_weight = torch.tensor(compute_pos_weight(train_labels[train_idx]), dtype=torch.float32, device=DEVICE)
-        cls_criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
-        cls_optimizer = torch.optim.AdamW(cls_model.parameters(), lr=CLS_LR, weight_decay=CLS_WEIGHT_DECAY)
-        cls_scheduler = None
-        if CLS_USE_SCHEDULER:
-            cls_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-                cls_optimizer,
-                mode="min",
-                patience=int(CLS_LR_SCHED_PATIENCE),
-                factor=float(CLS_LR_SCHED_FACTOR),
-            )
-        cls_scaler = torch.cuda.amp.GradScaler(enabled=(DEVICE == "cuda"))
-    
-        @torch.no_grad()
-        def cls_eval() -> dict:
-            cls_model.eval()
-            losses = []
-            logits_all = []
-            y_all = []
-            for x, yb in tqdm(dl_cls_val, desc="cls val", leave=False):
-                x = x.to(DEVICE, non_blocking=True)
-                yb = yb.to(DEVICE, non_blocking=True)
+            traceback.print_exc()
+        return out
+
+    def cls_train_one_epoch() -> float:
+        cls_model.train()
+        losses = []
+        for x, yb in tqdm(dl_cls_train, desc="cls train", leave=False):
+            x = x.to(DEVICE, non_blocking=True)
+            yb = yb.to(DEVICE, non_blocking=True)
+            cls_optimizer.zero_grad(set_to_none=True)
+            with torch.cuda.amp.autocast(enabled=(DEVICE == "cuda")):
                 logits = cls_model(x).view(-1, 1)
                 loss = cls_criterion(logits, yb)
-                losses.append(float(loss.item()))
-                logits_all.append(logits.detach().cpu().numpy())
-                y_all.append(yb.detach().cpu().numpy())
-            logits_np = np.concatenate(logits_all, axis=0).reshape(-1)
-            y_np = np.concatenate(y_all, axis=0).reshape(-1)
-            probs = 1.0 / (1.0 + np.exp(-logits_np))
-            acc = float(((probs >= 0.5).astype(np.int64) == y_np.astype(np.int64)).mean())
-            out = {"loss": float(np.mean(losses)) if losses else float("nan"), "acc@0.5": acc}
-            try:
-                from sklearn.metrics import roc_auc_score
-    
-                out["auc"] = float(roc_auc_score(y_np, probs))
-            except Exception:
-                traceback.print_exc()
-            return out
-    
-        def cls_train_one_epoch() -> float:
-            cls_model.train()
-            losses = []
-            for x, yb in tqdm(dl_cls_train, desc="cls train", leave=False):
-                x = x.to(DEVICE, non_blocking=True)
-                yb = yb.to(DEVICE, non_blocking=True)
-                cls_optimizer.zero_grad(set_to_none=True)
-                with torch.cuda.amp.autocast(enabled=(DEVICE == "cuda")):
-                    logits = cls_model(x).view(-1, 1)
-                    loss = cls_criterion(logits, yb)
-                cls_scaler.scale(loss).backward()
-                cls_scaler.step(cls_optimizer)
-                cls_scaler.update()
-                losses.append(float(loss.item()))
-            return float(np.mean(losses)) if losses else float("nan")
-    
-        def output_root() -> Path:
-            return Path("/kaggle/working") if is_kaggle() else Path(".").resolve()
-    
-        cls_save_dir = output_root() / "outputs" / "models_cls" / f"fold_{int(FOLD)}"
-        cls_save_dir.mkdir(parents=True, exist_ok=True)
-        cls_best_path = cls_save_dir / "best.pt"
-    
-        best_score = -1.0
-        best_epoch = 0
-        for epoch in range(1, int(CLS_EPOCHS) + 1):
-            tr_loss = cls_train_one_epoch()
-            val = cls_eval()
-            if cls_scheduler is not None:
-                cls_scheduler.step(float(val["loss"]))
-            score = float(val.get("auc", -val["loss"]))
-            print(f"[CLS] epoch {epoch:02d}/{CLS_EPOCHS} | train_loss={tr_loss:.4f} | val={val}")
-            if score > best_score:
-                best_score = score
-                best_epoch = int(epoch)
-                ckpt = {
-                    "model_state": cls_model.state_dict(),
-                    "config": {
-                        "backend": "timm",
-                        "model_name": CLS_MODEL_NAME,
-                        "image_size": int(CLS_IMAGE_SIZE),
-                        "pretrained": bool(CLS_PRETRAINED),
-                        "fold": int(FOLD),
-                        "seed": int(SEED),
-                    },
-                    "score": float(best_score),
-                }
-                torch.save(ckpt, cls_best_path)
-                print("[CLS] saved best ->", cls_best_path)
-            if CLS_PATIENCE and best_epoch and (int(epoch) - int(best_epoch) >= int(CLS_PATIENCE)):
-                print(f"[CLS] early stopping: sem melhora por {CLS_PATIENCE} épocas (best_epoch={best_epoch}).")
-                break
-    
-        print("[CLS] done. best score:", best_score)
-    except Exception:
-        print("[CLS] erro no treino; seguindo para próxima fase.")
-        traceback.print_exc()
+            cls_scaler.scale(loss).backward()
+            cls_scaler.step(cls_optimizer)
+            cls_scaler.update()
+            losses.append(float(loss.item()))
+        return float(np.mean(losses)) if losses else float("nan")
+
+    def output_root() -> Path:
+        return Path("/kaggle/working") if is_kaggle() else Path(".").resolve()
+
+    cls_save_dir = output_root() / "outputs" / "models_cls" / f"fold_{int(FOLD)}"
+    cls_save_dir.mkdir(parents=True, exist_ok=True)
+    cls_best_path = cls_save_dir / "best.pt"
+
+    best_score = -1.0
+    best_epoch = 0
+    for epoch in range(1, int(CLS_EPOCHS) + 1):
+        tr_loss = cls_train_one_epoch()
+        val = cls_eval()
+        if cls_scheduler is not None:
+            cls_scheduler.step(float(val["loss"]))
+        score = float(val.get("auc", -val["loss"]))
+        print(f"[CLS] epoch {epoch:02d}/{CLS_EPOCHS} | train_loss={tr_loss:.4f} | val={val}")
+        if score > best_score:
+            best_score = score
+            best_epoch = int(epoch)
+            ckpt_config = {
+                "backend": CLS_BACKEND,
+                "model_name": CLS_MODEL_NAME,
+                "image_size": int(CLS_IMAGE_SIZE),
+                "pretrained": bool(CLS_PRETRAINED),
+                "fold": int(FOLD),
+                "seed": int(SEED),
+            }
+            if CLS_BACKEND in {"dinov2", "hf"}:
+                ckpt_config.update(
+                    {
+                        "hf_model_id": CLS_HF_MODEL_ID,
+                        "local_files_only": CLS_LOCAL_FILES_ONLY,
+                        "freeze_encoder": CLS_FREEZE_ENCODER,
+                        "classifier_hidden": CLS_CLASSIFIER_HIDDEN,
+                        "classifier_dropout": CLS_CLASSIFIER_DROPOUT,
+                        "use_cls_token": CLS_USE_CLS_TOKEN,
+                    }
+                )
+            ckpt = {
+                "model_state": cls_model.state_dict(),
+                "config": ckpt_config,
+                "score": float(best_score),
+            }
+            torch.save(ckpt, cls_best_path)
+            print("[CLS] saved best ->", cls_best_path)
+        if CLS_PATIENCE and best_epoch and (int(epoch) - int(best_epoch) >= int(CLS_PATIENCE)):
+            print(f"[CLS] early stopping: sem melhora por {CLS_PATIENCE} épocas (best_epoch={best_epoch}).")
+            break
+
+    print("[CLS] done. best score:", best_score)
 else:
     print("[CLS] RUN_TRAIN_CLS=False (pulando).")
 
@@ -576,7 +600,7 @@ SEG_PATIENCE = 3
 SEG_USE_SCHEDULER = _env_bool("FORGERYSEG_SEG_USE_SCHEDULER", default=True)
 SEG_LR_SCHED_PATIENCE = int(os.environ.get("FORGERYSEG_SEG_LR_SCHED_PATIENCE", "2"))
 SEG_LR_SCHED_FACTOR = float(os.environ.get("FORGERYSEG_SEG_LR_SCHED_FACTOR", "0.5"))
-# Pesos pré-treinados: preferível (offline via cache); fallback para None se falhar.
+# Pesos pré-treinados: preferível (offline via cache); falha se faltar.
 _seg_weights_env = os.environ.get("FORGERYSEG_SEG_ENCODER_WEIGHTS", "imagenet")
 if str(_seg_weights_env).strip().lower() in {"", "none", "null", "false", "0"}:
     SEG_ENCODER_WEIGHTS = None
@@ -590,21 +614,33 @@ SEG_TRAIN_SPECS = [
         "model_id": "unetpp_effnet_b7",
         "arch": "unetplusplus",
         "encoder_name": "efficientnet-b7",
-        "encoder_fallback": "efficientnet-b4",
     },
     {
         "model_id": "deeplabv3p_tu_resnest101e",
         "arch": "deeplabv3plus",
         "encoder_name": "tu-resnest101e",
-        "encoder_fallback": "resnet101",
     },
     {
         "model_id": "segformer_mit_b3",
         "arch": "segformer",
         "encoder_name": "mit_b3",
-        "encoder_fallback": "mit_b2",
     },
 ]
+
+USE_DINOV2 = _env_bool("FORGERYSEG_USE_DINOV2", default=False)
+if USE_DINOV2:
+    SEG_TRAIN_SPECS.append(
+        {
+            "model_id": "dinov2_base_light",
+            "backend": "dinov2",
+            "arch": "dinov2",
+            "hf_model_id": os.environ.get("FORGERYSEG_SEG_HF_MODEL_ID", "metaresearch/dinov2"),
+            "freeze_encoder": _env_bool("FORGERYSEG_SEG_FREEZE_ENCODER", default=True),
+            "decoder_channels": [256, 128, 64],
+            "decoder_dropout": float(os.environ.get("FORGERYSEG_SEG_DECODER_DROPOUT", "0.0")),
+            "local_files_only": OFFLINE_NO_DOWNLOAD,
+        }
+    )
 
 if FAST_TRAIN:
     print("[SEG] FAST_TRAIN=True -> preset rápido (1 modelo / poucas épocas).")
@@ -619,24 +655,26 @@ if FAST_TRAIN:
         ]
 
 if RUN_TRAIN_SEG:
-    try:
-        train_aug = get_train_augment(patch_size=SEG_PATCH_SIZE, copy_move_prob=SEG_COPY_MOVE_PROB)
-        val_aug = get_val_augment()
-    
-        ds_seg_train = PatchDataset([train_samples[i] for i in train_idx.tolist()], patch_size=SEG_PATCH_SIZE, train=True, augment=train_aug, positive_prob=0.7, seed=SEED)
-        ds_seg_val = PatchDataset([train_samples[i] for i in val_idx.tolist()], patch_size=SEG_PATCH_SIZE, train=False, augment=val_aug, seed=SEED)
-    
-        num_workers = NUM_WORKERS
-        dl_seg_train = DataLoader(ds_seg_train, batch_size=SEG_BATCH_SIZE, shuffle=True, num_workers=num_workers, pin_memory=(DEVICE == "cuda"), drop_last=True)
-        dl_seg_val = DataLoader(ds_seg_val, batch_size=SEG_BATCH_SIZE, shuffle=False, num_workers=num_workers, pin_memory=(DEVICE == "cuda"), drop_last=False)
-    
-        def output_root() -> Path:
-            return Path("/kaggle/working") if is_kaggle() else Path(".").resolve()
-    
-        use_amp = (DEVICE == "cuda")
-    
-        def build_seg_model(arch: str, encoder_name: str, encoder_weights: str | None) -> nn.Module:
-            arch = str(arch).lower()
+    train_aug = get_train_augment(patch_size=SEG_PATCH_SIZE, copy_move_prob=SEG_COPY_MOVE_PROB)
+    val_aug = get_val_augment()
+
+    ds_seg_train = PatchDataset([train_samples[i] for i in train_idx.tolist()], patch_size=SEG_PATCH_SIZE, train=True, augment=train_aug, positive_prob=0.7, seed=SEED)
+    ds_seg_val = PatchDataset([train_samples[i] for i in val_idx.tolist()], patch_size=SEG_PATCH_SIZE, train=False, augment=val_aug, seed=SEED)
+
+    num_workers = NUM_WORKERS
+    dl_seg_train = DataLoader(ds_seg_train, batch_size=SEG_BATCH_SIZE, shuffle=True, num_workers=num_workers, pin_memory=(DEVICE == "cuda"), drop_last=True)
+    dl_seg_val = DataLoader(ds_seg_val, batch_size=SEG_BATCH_SIZE, shuffle=False, num_workers=num_workers, pin_memory=(DEVICE == "cuda"), drop_last=False)
+
+    def output_root() -> Path:
+        return Path("/kaggle/working") if is_kaggle() else Path(".").resolve()
+
+    use_amp = (DEVICE == "cuda")
+
+    def build_seg_model(spec: dict, encoder_weights: str | None) -> nn.Module:
+        backend = str(spec.get("backend", "smp")).lower()
+        if backend == "smp":
+            arch = str(spec.get("arch", "unet")).lower()
+            encoder_name = str(spec.get("encoder_name", "efficientnet-b4"))
             if arch == "unet":
                 return builders.build_unet(
                     encoder_name=encoder_name,
@@ -666,90 +704,93 @@ if RUN_TRAIN_SEG:
                     strict_weights=True,
                 )
             raise ValueError(f"SEG arch inválida: {arch!r}")
-    
-        try:
-            available_encoders = set(builders.available_encoders())
-        except Exception:
-            available_encoders = set()
 
-        for spec in SEG_TRAIN_SPECS:
-            model_id = str(spec["model_id"])
-            arch = str(spec.get("arch", "unetplusplus"))
-            encoder_name = str(spec.get("encoder_name", "efficientnet-b4"))
-            encoder_fallback = spec.get("encoder_fallback", None)
-            encoder_weights: str | None = spec.get("encoder_weights", SEG_ENCODER_WEIGHTS)
+        if backend in {"dinov2", "hf"}:
+            model_id = str(spec.get("hf_model_id", "metaresearch/dinov2"))
+            return dinov2.build_dinov2_segmenter(
+                model_id=model_id,
+                decoder_channels=spec.get("decoder_channels", (256, 128, 64)),
+                decoder_dropout=float(spec.get("decoder_dropout", 0.0)),
+                pretrained=True,
+                freeze_encoder=bool(spec.get("freeze_encoder", True)),
+                local_files_only=bool(spec.get("local_files_only", OFFLINE_NO_DOWNLOAD)),
+            )
 
-            if available_encoders and encoder_name not in available_encoders:
-                if encoder_fallback and str(encoder_fallback) in available_encoders:
-                    print(
-                        f"[SEG] encoder {encoder_name!r} indisponível; usando fallback {encoder_fallback!r}."
+        raise ValueError(f"SEG backend inválido: {backend!r}")
+
+    available_encoders = set(builders.available_encoders())
+
+    for spec in SEG_TRAIN_SPECS:
+        model_id = str(spec["model_id"])
+        backend = str(spec.get("backend", "smp")).lower()
+        arch = str(spec.get("arch", "unetplusplus"))
+        encoder_name = str(spec.get("encoder_name", spec.get("hf_model_id", "efficientnet-b4")))
+        encoder_weights: str | None = spec.get("encoder_weights", SEG_ENCODER_WEIGHTS)
+
+        if backend == "smp" and available_encoders and encoder_name not in available_encoders:
+            raise ValueError(f"[SEG] encoder {encoder_name!r} não listado em SMP.")
+
+        seg_model = build_seg_model(spec, encoder_weights).to(DEVICE)
+
+        seg_criterion = BCETverskyLoss(alpha=0.7, beta=0.3, tversky_weight=1.0)
+        seg_optimizer = torch.optim.AdamW(seg_model.parameters(), lr=SEG_LR, weight_decay=SEG_WEIGHT_DECAY)
+        seg_scheduler = None
+        if SEG_USE_SCHEDULER:
+            seg_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+                seg_optimizer,
+                mode="min",
+                patience=int(SEG_LR_SCHED_PATIENCE),
+                factor=float(SEG_LR_SCHED_FACTOR),
+            )
+
+        seg_save_dir = output_root() / "outputs" / "models_seg" / model_id / f"fold_{int(FOLD)}"
+        seg_save_dir.mkdir(parents=True, exist_ok=True)
+        seg_best_path = seg_save_dir / "best.pt"
+
+        best_dice = -1.0
+        best_epoch = 0
+        for epoch in range(1, int(SEG_EPOCHS) + 1):
+            tr = train_one_epoch(seg_model, dl_seg_train, seg_criterion, seg_optimizer, DEVICE, use_amp=use_amp, progress=True, desc=f"seg train ({model_id})")
+            val_stats, val_dice = validate(seg_model, dl_seg_val, seg_criterion, DEVICE, progress=True, desc=f"seg val ({model_id})")
+            if seg_scheduler is not None:
+                seg_scheduler.step(float(val_stats.loss))
+            print(f"[SEG {model_id}] epoch {epoch:02d}/{SEG_EPOCHS} | train_loss={tr.loss:.4f} | val_loss={val_stats.loss:.4f} | dice@0.5={val_dice:.4f}")
+            if float(val_dice) > best_dice:
+                best_dice = float(val_dice)
+                best_epoch = int(epoch)
+                ckpt_config = {
+                    "backend": backend,
+                    "arch": arch,
+                    "encoder_name": encoder_name,
+                    "encoder_weights": encoder_weights,
+                    "classes": 1,
+                    "model_id": model_id,
+                    "patch_size": int(SEG_PATCH_SIZE),
+                    "fold": int(FOLD),
+                    "seed": int(SEED),
+                }
+                if backend in {"dinov2", "hf"}:
+                    ckpt_config.update(
+                        {
+                            "hf_model_id": spec.get("hf_model_id", encoder_name),
+                            "freeze_encoder": bool(spec.get("freeze_encoder", True)),
+                            "decoder_channels": spec.get("decoder_channels", (256, 128, 64)),
+                            "decoder_dropout": float(spec.get("decoder_dropout", 0.0)),
+                            "local_files_only": bool(spec.get("local_files_only", OFFLINE_NO_DOWNLOAD)),
+                        }
                     )
-                    encoder_name = str(encoder_fallback)
-                else:
-                    print(f"[SEG] encoder {encoder_name!r} não listado em SMP; tentando mesmo assim.")
-    
-            try:
-                seg_model = build_seg_model(arch, encoder_name, encoder_weights).to(DEVICE)
-            except Exception:
-                if encoder_weights is not None:
-                    print(f"[SEG] falha ao carregar encoder_weights={encoder_weights!r}; fallback para None.")
-                    traceback.print_exc()
-                    encoder_weights = None
-                    seg_model = build_seg_model(arch, encoder_name, encoder_weights).to(DEVICE)
-                else:
-                    raise
-    
-            seg_criterion = BCETverskyLoss(alpha=0.7, beta=0.3, tversky_weight=1.0)
-            seg_optimizer = torch.optim.AdamW(seg_model.parameters(), lr=SEG_LR, weight_decay=SEG_WEIGHT_DECAY)
-            seg_scheduler = None
-            if SEG_USE_SCHEDULER:
-                seg_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-                    seg_optimizer,
-                    mode="min",
-                    patience=int(SEG_LR_SCHED_PATIENCE),
-                    factor=float(SEG_LR_SCHED_FACTOR),
-                )
-    
-            seg_save_dir = output_root() / "outputs" / "models_seg" / model_id / f"fold_{int(FOLD)}"
-            seg_save_dir.mkdir(parents=True, exist_ok=True)
-            seg_best_path = seg_save_dir / "best.pt"
-    
-            best_dice = -1.0
-            best_epoch = 0
-            for epoch in range(1, int(SEG_EPOCHS) + 1):
-                tr = train_one_epoch(seg_model, dl_seg_train, seg_criterion, seg_optimizer, DEVICE, use_amp=use_amp, progress=True, desc=f"seg train ({model_id})")
-                val_stats, val_dice = validate(seg_model, dl_seg_val, seg_criterion, DEVICE, progress=True, desc=f"seg val ({model_id})")
-                if seg_scheduler is not None:
-                    seg_scheduler.step(float(val_stats.loss))
-                print(f"[SEG {model_id}] epoch {epoch:02d}/{SEG_EPOCHS} | train_loss={tr.loss:.4f} | val_loss={val_stats.loss:.4f} | dice@0.5={val_dice:.4f}")
-                if float(val_dice) > best_dice:
-                    best_dice = float(val_dice)
-                    best_epoch = int(epoch)
-                    ckpt = {
-                        "model_state": seg_model.state_dict(),
-                        "config": {
-                            "backend": "smp",
-                            "arch": arch,
-                            "encoder_name": encoder_name,
-                            "encoder_weights": encoder_weights,
-                            "classes": 1,
-                            "model_id": model_id,
-                            "patch_size": int(SEG_PATCH_SIZE),
-                            "fold": int(FOLD),
-                            "seed": int(SEED),
-                        },
-                        "score": float(best_dice),
-                    }
-                    torch.save(ckpt, seg_best_path)
-                    print("[SEG] saved best ->", seg_best_path)
-                if SEG_PATIENCE and best_epoch and (int(epoch) - int(best_epoch) >= int(SEG_PATIENCE)):
-                    print(f"[SEG {model_id}] early stopping: sem melhora por {SEG_PATIENCE} épocas (best_epoch={best_epoch}).")
-                    break
-    
-            print(f"[SEG {model_id}] done. best dice:", best_dice)
-    except Exception:
-        print("[SEG] erro no treino; seguindo para submissão.")
-        traceback.print_exc()
+                ckpt = {
+                    "model_state": seg_model.state_dict(),
+                    "config": ckpt_config,
+                    "score": float(best_dice),
+                }
+                torch.save(ckpt, seg_best_path)
+                print("[SEG] saved best ->", seg_best_path)
+            if SEG_PATIENCE and best_epoch and (int(epoch) - int(best_epoch) >= int(SEG_PATIENCE)):
+                print(f"[SEG {model_id}] early stopping: sem melhora por {SEG_PATIENCE} épocas (best_epoch={best_epoch}).")
+                break
+
+        print(f"[SEG {model_id}] done. best dice:", best_dice)
 else:
     print("[SEG] RUN_TRAIN_SEG=False (pulando).")
 
@@ -891,6 +932,64 @@ if USE_MODEL_SUBMISSION:
     if "model" not in globals():
         raise RuntimeError("Defina a variável `model` antes de ativar FORGERYSEG_USE_MODEL_SUBMISSION=1.")
 
+    USE_TTA = _env_bool("FORGERYSEG_TTA", default=True)
+    TTA_MODES = ("none", "hflip", "vflip", "rot90", "rot180", "rot270")
+
+    def _apply_tta(image: np.ndarray, mode: str) -> np.ndarray:
+        if mode == "none":
+            return image
+        if mode == "hflip":
+            return np.ascontiguousarray(image[:, ::-1])
+        if mode == "vflip":
+            return np.ascontiguousarray(image[::-1, :])
+        if mode == "rot90":
+            return np.ascontiguousarray(np.rot90(image, k=1))
+        if mode == "rot180":
+            return np.ascontiguousarray(np.rot90(image, k=2))
+        if mode == "rot270":
+            return np.ascontiguousarray(np.rot90(image, k=3))
+        raise ValueError(f"TTA mode inválido: {mode}")
+
+    def _undo_tta(mask: np.ndarray, mode: str) -> np.ndarray:
+        if mode == "none":
+            return mask
+        if mode == "hflip":
+            return np.ascontiguousarray(mask[:, ::-1])
+        if mode == "vflip":
+            return np.ascontiguousarray(mask[::-1, :])
+        if mode == "rot90":
+            return np.ascontiguousarray(np.rot90(mask, k=3))
+        if mode == "rot180":
+            return np.ascontiguousarray(np.rot90(mask, k=2))
+        if mode == "rot270":
+            return np.ascontiguousarray(np.rot90(mask, k=1))
+        raise ValueError(f"TTA mode inválido: {mode}")
+
+    def _default_predict_fn(image: np.ndarray) -> np.ndarray:
+        if hasattr(model, "predict"):
+            pred = model.predict(image[None])[0]
+        else:
+            from forgeryseg.inference import predict_image
+
+            pred = predict_image(model, image, DEVICE)
+        pred = np.asarray(pred)
+        if pred.ndim > 2:
+            pred = np.squeeze(pred)
+        if pred.ndim != 2:
+            raise ValueError(f"Predição esperada HxW, obtido shape={pred.shape}")
+        return pred.astype(np.float32)
+
+    def _tta_predict(image: np.ndarray) -> np.ndarray:
+        if not USE_TTA:
+            return _default_predict_fn(image)
+        preds = []
+        for mode in TTA_MODES:
+            img_t = _apply_tta(image, mode)
+            pred_t = _default_predict_fn(img_t)
+            pred = _undo_tta(pred_t, mode)
+            preds.append(pred)
+        return np.mean(preds, axis=0)
+
     annotations = []
     for case_id in case_ids:
         key = str(case_id)
@@ -900,7 +999,7 @@ if USE_MODEL_SUBMISSION:
         # carregue e processe a imagem
         img = np.array(Image.open(img_path)) / 255.0
         # modelo deve gerar um mapa de probabilidade ou máscara
-        pred_prob = model.predict(img[None])[0]  # exemplo
+        pred_prob = _tta_predict(img)
         binary_mask = (pred_prob > THRESHOLD).astype(np.uint8)
         annotations.append(encode_submission(binary_mask))
 
@@ -1025,42 +1124,31 @@ def _find_models_dir_with_ckpt() -> Path | None:
 
 
 if RUN_SUBMISSION_SCRIPT:
-    try:
-        submit_script = _find_submit_ensemble_script()
-        infer_cfg_path = _find_infer_cfg_path()
+    submit_script = _find_submit_ensemble_script()
+    infer_cfg_path = _find_infer_cfg_path()
 
-        submission_path = output_root() / "submission.csv"
-        models_dir = _find_models_dir_with_ckpt()
+    submission_path = output_root() / "submission.csv"
+    models_dir = _find_models_dir_with_ckpt()
+    if models_dir is None:
+        raise RuntimeError("[SUBMISSION] nenhum checkpoint encontrado em outputs/models_seg.")
 
-        cmd = [
-            sys.executable,
-            str(submit_script),
-            "--data-root",
-            str(DATA_ROOT),
-            "--out-csv",
-            str(submission_path),
-        ]
-        if models_dir is not None:
-            cmd += ["--models-dir", str(models_dir)]
-            if infer_cfg_path is not None:
-                cmd += ["--config", str(infer_cfg_path)]
+    cmd = [
+        sys.executable,
+        str(submit_script),
+        "--data-root",
+        str(DATA_ROOT),
+        "--out-csv",
+        str(submission_path),
+    ]
+    cmd += ["--models-dir", str(models_dir)]
+    if infer_cfg_path is not None:
+        cmd += ["--config", str(infer_cfg_path)]
 
-            print("[SUBMISSION] script:", submit_script)
-            if infer_cfg_path is not None:
-                print("[SUBMISSION] cfg:", infer_cfg_path)
-            print("[SUBMISSION] running:", " ".join(cmd))
-            subprocess.check_call(cmd)
-            print("[SUBMISSION] wrote:", submission_path)
-        else:
-            print("[SUBMISSION] nenhum checkpoint encontrado; gerando baseline 'authentic'.")
-            submission_path = _write_submission_csv(submissions)
-            print("[SUBMISSION] wrote fallback:", submission_path)
-            RUN_SUBMISSION_SIMPLE = True
-    except Exception:
-        print("[SUBMISSION] erro ao rodar submit_ensemble.py; fallback para baseline 'authentic'.")
-        traceback.print_exc()
-        submission_path = _write_submission_csv(submissions)
-        print("[SUBMISSION] wrote fallback:", submission_path)
-        RUN_SUBMISSION_SIMPLE = True
+    print("[SUBMISSION] script:", submit_script)
+    if infer_cfg_path is not None:
+        print("[SUBMISSION] cfg:", infer_cfg_path)
+    print("[SUBMISSION] running:", " ".join(cmd))
+    subprocess.check_call(cmd)
+    print("[SUBMISSION] wrote:", submission_path)
 else:
     print("[SUBMISSION] RUN_SUBMISSION_SCRIPT=False (pulando).")

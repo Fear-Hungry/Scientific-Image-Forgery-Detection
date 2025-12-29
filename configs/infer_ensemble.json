@@ -8,16 +8,24 @@
   "overlap": 128,
   "max_size": 0,
   "threshold": 0.5,
-  "min_area": 32,
-  "cls_skip_threshold": 0.3,
+  "adaptive_threshold": true,
+  "threshold_factor": 0.3,
+  "min_area": 30,
+  "min_area_percent": 0.0005,
+  "min_confidence": 0.33,
+  "closing": 5,
+  "closing_iters": 1,
+  "opening": 3,
+  "opening_iters": 1,
+  "cls_skip_threshold": "auto",
   "models": [
     {
-      "model_id": "unetpp_effnet_b7",
-      "weight": 0.4
+      "model_id": "dinov2_base_light",
+      "weight": 0.5
     },
     {
-      "model_id": "deeplabv3p_tu_resnest101e",
-      "weight": 0.4
+      "model_id": "unetpp_effnet_b7",
+      "weight": 0.3
     },
     {
       "model_id": "segformer_mit_b3",

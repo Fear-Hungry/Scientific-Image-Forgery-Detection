@@ -316,6 +316,8 @@ def get_train_augment(
     copy_move_max_area_frac: float = 0.20,
     copy_move_rotation_limit: float = 15.0,
     copy_move_scale_range: tuple[float, float] = (0.9, 1.1),
+    grayscale_prob: float = 0.1,
+    cutout_prob: float = 0.2,
 ):
     if A is None:
         raise ImportError("albumentations is required for augmentations")
@@ -364,6 +366,11 @@ def get_train_augment(
         crop_h, crop_w = hw
         transforms.append(_random_resized_crop((crop_h, crop_w), scale=(0.75, 1.0), ratio=(0.85, 1.15), p=0.35))
 
+    if float(grayscale_prob) > 0:
+        if not hasattr(A, "ToGray"):
+            raise ImportError("albumentations.ToGray is required for grayscale augmentation")
+        transforms.append(A.ToGray(p=float(grayscale_prob)))
+
     transforms.extend(
         [
             # Photometric / intensity transforms (robustness to acquisition variation).
@@ -410,7 +417,7 @@ def get_train_augment(
                 ],
                 p=0.10,
             ),
-            _coarse_dropout(p=0.20),
+            _coarse_dropout(p=float(cutout_prob)),
             _image_compression(quality_range=(60, 100), p=0.10),
         ]
     )

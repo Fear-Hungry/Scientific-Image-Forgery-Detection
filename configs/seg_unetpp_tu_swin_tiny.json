@@ -1,7 +1,7 @@
 {
-  "model_id": "deeplabv3p_tu_resnest101e",
-  "arch": "deeplabv3plus",
-  "encoder_name": "tu-resnest101e",
+  "model_id": "unetpp_tu_swin_tiny",
+  "arch": "unetplusplus",
+  "encoder_name": "tu-swin_tiny_patch4_window7_224",
   "encoder_weights": "imagenet",
   "patch_size": 512,
   "batch_size": 4,

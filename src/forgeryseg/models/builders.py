@@ -46,16 +46,7 @@ def available_encoders() -> list[str]:
 def _safe_init(builder, *, encoder_weights: Optional[str], strict_weights: bool, **kwargs):
     if smp is None:
         raise ImportError("segmentation_models_pytorch is required for model builders")
-    if encoder_weights is None or strict_weights:
-        return builder(encoder_weights=encoder_weights, **kwargs)
-
-    try:
-        return builder(encoder_weights=encoder_weights, **kwargs)
-    except Exception as exc:
-        try:
-            return builder(encoder_weights=None, **kwargs)
-        except Exception:
-            raise exc
+    return builder(encoder_weights=encoder_weights, **kwargs)
 
 
 def build_unet(

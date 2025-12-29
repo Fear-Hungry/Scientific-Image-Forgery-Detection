@@ -83,9 +83,15 @@ def main() -> None:
     parser.add_argument("--encoder-name", default="", help="Override encoder name")
     parser.add_argument("--encoder-weights", default="", help="Override encoder weights")
     parser.add_argument("--threshold", type=float, default=0.5, help="Binarization threshold")
-    parser.add_argument("--min-area", type=int, default=0, help="Minimum component area")
+    parser.add_argument("--adaptive-threshold", action="store_true", help="Use adaptive threshold (mean + factor * std)")
+    parser.add_argument("--threshold-factor", type=float, default=0.3, help="Factor for adaptive threshold")
+    parser.add_argument("--min-area", type=int, default=30, help="Minimum component area")
+    parser.add_argument("--min-area-percent", type=float, default=0.0, help="Minimum mask area fraction (0 disables)")
+    parser.add_argument("--min-confidence", type=float, default=0.0, help="Minimum mean prob inside mask (0 disables)")
     parser.add_argument("--closing", type=int, default=0, help="Morphological closing kernel size (0=disabled)")
     parser.add_argument("--closing-iters", type=int, default=1, help="Morphological closing iterations")
+    parser.add_argument("--opening", type=int, default=0, help="Morphological opening kernel size (0=disabled)")
+    parser.add_argument("--opening-iters", type=int, default=1, help="Morphological opening iterations")
     parser.add_argument("--fill-holes", action="store_true", help="Fill holes in binary mask")
     parser.add_argument("--median", type=int, default=0, help="Median smoothing kernel size (0=disabled, odd>=3)")
     parser.add_argument("--tile-size", type=int, default=0, help="Tile size for inference")
@@ -139,9 +145,15 @@ def main() -> None:
             pred_instances = prob_to_instances(
                 pred,
                 threshold=args.threshold,
+                adaptive_threshold=args.adaptive_threshold,
+                threshold_factor=args.threshold_factor,
                 min_area=args.min_area,
+                min_area_percent=args.min_area_percent,
+                min_confidence=args.min_confidence,
                 closing_ksize=args.closing,
                 closing_iters=args.closing_iters,
+                opening_ksize=args.opening,
+                opening_iters=args.opening_iters,
                 fill_holes_enabled=args.fill_holes,
                 median_ksize=args.median,
             )

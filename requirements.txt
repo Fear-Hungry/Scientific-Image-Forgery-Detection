@@ -8,4 +8,5 @@ torch
 torchvision
 timm
 segmentation-models-pytorch
+transformers
 pytest

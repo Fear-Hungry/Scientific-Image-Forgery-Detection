@@ -30,6 +30,9 @@ def build_classification_transform(
     p_vflip: float = 0.5,
     brightness: float = 0.2,
     contrast: float = 0.2,
+    grayscale_prob: float = 0.1,
+    blur_prob: float = 0.1,
+    cutout_prob: float = 0.2,
 ) -> "T.Compose":
     if T is None:
         raise ImportError("torchvision is required for classification transforms")
@@ -38,8 +41,16 @@ def build_classification_transform(
     if train:
         aug.append(T.RandomHorizontalFlip(p=float(p_hflip)))
         aug.append(T.RandomVerticalFlip(p=float(p_vflip)))
+        if float(grayscale_prob) > 0:
+            if not hasattr(T, "RandomGrayscale"):
+                raise ImportError("torchvision RandomGrayscale is required for grayscale augmentation")
+            aug.append(T.RandomGrayscale(p=float(grayscale_prob)))
         if brightness or contrast:
             aug.append(T.ColorJitter(brightness=float(brightness), contrast=float(contrast)))
+        if float(blur_prob) > 0:
+            if not hasattr(T, "GaussianBlur"):
+                raise ImportError("torchvision GaussianBlur is required for blur augmentation")
+            aug.append(T.GaussianBlur(kernel_size=3, sigma=(0.1, 2.0)))
 
     aug.extend(
         [
@@ -48,6 +59,17 @@ def build_classification_transform(
             T.Normalize(IMAGENET_MEAN, IMAGENET_STD),
         ]
     )
+    if train and float(cutout_prob) > 0:
+        if not hasattr(T, "RandomErasing"):
+            raise ImportError("torchvision RandomErasing is required for cutout augmentation")
+        aug.append(
+            T.RandomErasing(
+                p=float(cutout_prob),
+                scale=(0.02, 0.2),
+                ratio=(0.3, 3.3),
+                value=0,
+            )
+        )
     return T.Compose(aug)
 
 
@@ -74,4 +96,3 @@ class BinaryForgeryClsDataset(Dataset):
             x = self.transform(img)
         y = torch.tensor([0.0 if s.is_authentic else 1.0], dtype=torch.float32)
         return x, y
-

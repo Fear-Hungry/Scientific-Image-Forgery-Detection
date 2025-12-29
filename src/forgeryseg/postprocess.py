@@ -45,6 +45,29 @@ def morph_close(mask: np.ndarray, kernel_size: int = 3, iterations: int = 1) -> 
     return (out > 0).astype(np.uint8)
 
 
+def morph_open(mask: np.ndarray, kernel_size: int = 3, iterations: int = 1) -> np.ndarray:
+    """
+    Morphological opening (erosion then dilation) on a binary mask.
+    Returns a uint8 (0/1) mask.
+    """
+    mask = np.asarray(mask)
+    if mask.ndim != 2:
+        raise ValueError(f"Expected 2D mask, got shape {mask.shape}")
+    kernel_size = int(kernel_size)
+    iterations = int(iterations)
+    if kernel_size <= 0:
+        raise ValueError(f"kernel_size must be >= 1, got {kernel_size}")
+    if iterations <= 0:
+        raise ValueError(f"iterations must be >= 1, got {iterations}")
+    if cv2 is None:
+        raise ImportError("opencv-python (cv2) is required for morphological operations")
+
+    m = (mask > 0).astype(np.uint8)
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kernel_size, kernel_size))
+    out = cv2.morphologyEx(m, cv2.MORPH_OPEN, kernel, iterations=iterations)
+    return (out > 0).astype(np.uint8)
+
+
 def fill_holes(mask: np.ndarray) -> np.ndarray:
     """
     Fill internal holes in a binary mask. Returns a uint8 (0/1) mask.
@@ -96,6 +119,8 @@ def postprocess_binary(
     *,
     closing_ksize: int = 0,
     closing_iters: int = 1,
+    opening_ksize: int = 0,
+    opening_iters: int = 1,
     fill_holes_enabled: bool = False,
     median_ksize: int = 0,
 ) -> np.ndarray:
@@ -108,6 +133,8 @@ def postprocess_binary(
 
     if closing_ksize:
         out = morph_close(out, kernel_size=int(closing_ksize), iterations=int(closing_iters))
+    if opening_ksize:
+        out = morph_open(out, kernel_size=int(opening_ksize), iterations=int(opening_iters))
     if fill_holes_enabled:
         out = fill_holes(out)
     if median_ksize:
@@ -120,24 +147,84 @@ def prob_to_instances(
     prob: np.ndarray,
     *,
     threshold: float = 0.5,
+    adaptive_threshold: bool = False,
+    threshold_factor: float = 0.3,
     min_area: int = 0,
+    min_area_percent: float = 0.0,
+    min_confidence: float = 0.0,
     closing_ksize: int = 0,
     closing_iters: int = 1,
+    opening_ksize: int = 0,
+    opening_iters: int = 1,
     fill_holes_enabled: bool = False,
     median_ksize: int = 0,
 ) -> List[np.ndarray]:
     """
     Convert a 2D probability map into post-processed connected components.
     """
-    bin_mask = binarize(prob, threshold=float(threshold))
+    prob = np.asarray(prob, dtype=np.float32)
+    if prob.ndim != 2:
+        raise ValueError(f"Expected 2D prob map, got shape {prob.shape}")
+
+    if adaptive_threshold:
+        thr = adaptive_threshold_value(prob, factor=float(threshold_factor))
+    else:
+        thr = float(threshold)
+    bin_mask = binarize(prob, threshold=float(thr))
     bin_mask = postprocess_binary(
         bin_mask,
         closing_ksize=int(closing_ksize),
         closing_iters=int(closing_iters),
+        opening_ksize=int(opening_ksize),
+        opening_iters=int(opening_iters),
         fill_holes_enabled=bool(fill_holes_enabled),
         median_ksize=int(median_ksize),
     )
-    return extract_components(bin_mask, min_area=int(min_area))
+    total_pixels = int(prob.shape[0] * prob.shape[1])
+    min_area_percent = _normalize_percent(min_area_percent)
+    min_area_px = int(round(min_area_percent * total_pixels)) if min_area_percent > 0 else 0
+    effective_min_area = max(int(min_area), int(min_area_px))
+    instances = extract_components(bin_mask, min_area=effective_min_area)
+
+    if min_area_percent > 0 or min_confidence > 0:
+        if not instances:
+            return []
+        union = mask_from_instances(instances, prob.shape)
+        area = int(union.sum())
+        area_percent = float(area) / float(total_pixels) if total_pixels > 0 else 0.0
+        if min_area_percent > 0 and area_percent < float(min_area_percent):
+            return []
+        if float(min_confidence) > 0:
+            mean_conf = float(prob[union > 0].mean()) if area > 0 else 0.0
+            if mean_conf < float(min_confidence):
+                return []
+
+    return instances
+
+
+def adaptive_threshold_value(prob: np.ndarray, factor: float = 0.3) -> float:
+    """
+    Compute an adaptive threshold: mean + factor * std, clamped to [0, 1].
+    """
+    arr = np.asarray(prob, dtype=np.float32)
+    if arr.ndim != 2:
+        raise ValueError(f"Expected 2D prob map, got shape {arr.shape}")
+    mean = float(arr.mean())
+    std = float(arr.std())
+    thr = mean + float(factor) * std
+    eps = float(np.finfo(np.float32).eps)
+    return float(np.clip(thr, eps, 1.0))
+
+
+def _normalize_percent(value: float) -> float:
+    v = float(value)
+    if v < 0:
+        raise ValueError("min_area_percent must be >= 0")
+    if v == 0:
+        return 0.0
+    if v > 1.0:
+        v = v / 100.0
+    return float(v)
 
 
 def extract_components(mask: np.ndarray, min_area: int = 0) -> List[np.ndarray]:

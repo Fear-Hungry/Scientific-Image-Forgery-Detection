@@ -1,0 +1,23 @@
+{
+  "model_id": "cls_dinov2_base",
+  "backend": "dinov2",
+  "model_name": "dinov2",
+  "hf_model_id": "metaresearch/dinov2",
+  "image_size": 392,
+  "batch_size": 16,
+  "epochs": 10,
+  "patience": 3,
+  "learning_rate": 0.0003,
+  "weight_decay": 0.01,
+  "num_workers": 2,
+  "use_amp": true,
+  "pretrained": true,
+  "strict_pretrained": false,
+  "freeze_encoder": true,
+  "classifier_hidden": 0,
+  "classifier_dropout": 0.1,
+  "use_cls_token": true,
+  "local_files_only": true,
+  "seed": 42,
+  "folds": 5
+}

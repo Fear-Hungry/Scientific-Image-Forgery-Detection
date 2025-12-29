@@ -5,7 +5,6 @@ import argparse
 import csv
 import json
 import os
-import traceback
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
@@ -34,10 +33,10 @@ def is_kaggle() -> bool:
 
 DEFAULT_TTA = ("none", "hflip", "vflip")
 DEFAULT_CLS_SKIP_THRESHOLD = 0.30
-# Peso padrão inspirado no PDF (U-Net++ + DeepLabV3+ + SegFormer).
+# Pesos padrão (exemplo): DINOv2 + U-Net++ + SegFormer.
 DEFAULT_MODEL_WEIGHTS = {
-    "unetpp_effnet_b7": 0.4,
-    "deeplabv3p_tu_resnest101e": 0.4,
+    "dinov2_base_light": 0.5,
+    "unetpp_effnet_b7": 0.3,
     "segformer_mit_b3": 0.2,
 }
 
@@ -185,28 +184,21 @@ def _load_seg_models(
     model_ids_set = set(model_ids) if model_ids else None
 
     for ckpt_path in ckpt_paths:
-        try:
-            state, cfg = load_checkpoint(ckpt_path)
-            model_id = str(cfg.get("model_id") or _infer_model_id_from_path(models_dir, ckpt_path))
-            if model_ids_set and model_id not in model_ids_set:
-                continue
-            score = cfg.get("score", None)
-            if score is None:
-                try:
-                    ckpt_raw = torch.load(ckpt_path, map_location="cpu")
-                    score = ckpt_raw.get("score", None) if isinstance(ckpt_raw, dict) else None
-                except Exception:
-                    score = None
+        state, cfg = load_checkpoint(ckpt_path)
+        model_id = str(cfg.get("model_id") or _infer_model_id_from_path(models_dir, ckpt_path))
+        if model_ids_set and model_id not in model_ids_set:
+            continue
+        score = cfg.get("score", None)
+        if score is None:
+            ckpt_raw = torch.load(ckpt_path, map_location="cpu")
+            score = ckpt_raw.get("score", None) if isinstance(ckpt_raw, dict) else None
 
-            m = build_segmentation_from_config(cfg)
-            m.load_state_dict(state)
-            m.to(device)
-            m.eval()
-            w = float(model_weights.get(model_id, 1.0))
-            entries.append(SegEntry(model_id=model_id, ckpt_path=ckpt_path, model=m, weight=w, score=score))
-        except Exception:
-            print("[ERRO] falha ao carregar seg:", ckpt_path)
-            traceback.print_exc()
+        m = build_segmentation_from_config(cfg)
+        m.load_state_dict(state)
+        m.to(device)
+        m.eval()
+        w = float(model_weights.get(model_id, 1.0))
+        entries.append(SegEntry(model_id=model_id, ckpt_path=ckpt_path, model=m, weight=w, score=score))
 
     if not entries:
         tried = ", ".join(
@@ -243,25 +235,27 @@ def _load_seg_models(
     return entries
 
 
-def _load_cls_models(cls_models_dir: Path, device: str) -> tuple[list[nn.Module], int]:
+def _load_cls_models(cls_models_dir: Path, device: str) -> tuple[list[nn.Module], int, list[float]]:
     models: list[nn.Module] = []
     image_size = 0
+    thresholds: list[float] = []
     for ckpt_path in sorted(cls_models_dir.glob("fold_*/best.pt")):
-        try:
-            state, cfg = load_checkpoint(ckpt_path)
-            m, size = build_classifier_from_config(cfg)
-            image_size = int(size)
-            m.load_state_dict(state)
-            m.to(device)
-            m.eval()
-            models.append(m)
-        except Exception:
-            print("[ERRO] falha ao carregar cls:", ckpt_path)
-            traceback.print_exc()
+        state, cfg = load_checkpoint(ckpt_path)
+        m, size = build_classifier_from_config(cfg)
+        image_size = int(size)
+        m.load_state_dict(state)
+        m.to(device)
+        m.eval()
+        models.append(m)
+        if "cls_threshold" in cfg:
+            try:
+                thresholds.append(float(cfg["cls_threshold"]))
+            except Exception:
+                pass
 
     if models:
         print("[CLS] loaded models:", len(models), "| image_size:", image_size)
-    return models, int(image_size)
+    return models, int(image_size), thresholds
 
 
 @torch.no_grad()
@@ -337,16 +331,21 @@ def main() -> None:
     parser.add_argument("--overlap", type=int, default=128, help="Tile overlap")
     parser.add_argument("--max-size", type=int, default=0, help="Optional resize long side")
     parser.add_argument("--threshold", type=float, default=0.5, help="Binarization threshold")
-    parser.add_argument("--min-area", type=int, default=32, help="Minimum component area")
+    parser.add_argument("--adaptive-threshold", action="store_true", help="Use adaptive threshold (mean + factor * std)")
+    parser.add_argument("--threshold-factor", type=float, default=0.3, help="Factor for adaptive threshold")
+    parser.add_argument("--min-area", type=int, default=30, help="Minimum component area")
+    parser.add_argument("--min-area-percent", type=float, default=0.0, help="Minimum mask area fraction (0 disables)")
+    parser.add_argument("--min-confidence", type=float, default=0.0, help="Minimum mean prob inside mask (0 disables)")
     parser.add_argument("--closing", type=int, default=0, help="Morphological closing kernel size (0=disabled)")
     parser.add_argument("--closing-iters", type=int, default=1, help="Morphological closing iterations")
+    parser.add_argument("--opening", type=int, default=0, help="Morphological opening kernel size (0=disabled)")
+    parser.add_argument("--opening-iters", type=int, default=1, help="Morphological opening iterations")
     parser.add_argument("--fill-holes", action="store_true", help="Fill holes in binary mask")
     parser.add_argument("--median", type=int, default=0, help="Median smoothing kernel size (0=disabled, odd>=3)")
     parser.add_argument(
         "--cls-skip-threshold",
-        type=float,
-        default=DEFAULT_CLS_SKIP_THRESHOLD,
-        help="Skip seg when p_forged < this (<=0 disables the gate)",
+        default=str(DEFAULT_CLS_SKIP_THRESHOLD),
+        help="Skip seg when p_forged < this (<=0 disables the gate). Use 'auto' to load from cls checkpoints.",
     )
     parser.add_argument("--device", default="", help="Device override")
     parser.add_argument("--limit", type=int, default=0, help="Limit number of test samples (debug)")
@@ -384,7 +383,9 @@ def main() -> None:
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
     cfg_fallback = cfg.get("fallback_authentic", args.fallback_authentic)
-    fallback_authentic = is_kaggle() if cfg_fallback is None else bool(cfg_fallback)
+    if cfg_fallback:
+        raise RuntimeError("fallback_authentic disabled: no fallbacks allowed when checkpoints are missing.")
+    fallback_authentic = False
 
     try:
         models_dir = _find_models_dir("models_seg", cfg.get("models_dir", args.models_dir) or None)
@@ -431,13 +432,31 @@ def main() -> None:
     overlap = int(cfg.get("overlap", args.overlap))
     max_size = int(cfg.get("max_size", args.max_size))
     threshold = float(cfg.get("threshold", args.threshold))
+    adaptive_threshold = bool(cfg.get("adaptive_threshold", args.adaptive_threshold))
+    threshold_factor = float(cfg.get("threshold_factor", args.threshold_factor))
     min_area = int(cfg.get("min_area", args.min_area))
+    min_area_percent = float(cfg.get("min_area_percent", args.min_area_percent))
+    min_confidence = float(cfg.get("min_confidence", args.min_confidence))
     closing = int(cfg.get("closing", args.closing))
     closing_iters = int(cfg.get("closing_iters", args.closing_iters))
+    opening = int(cfg.get("opening", args.opening))
+    opening_iters = int(cfg.get("opening_iters", args.opening_iters))
     fill_holes = bool(cfg.get("fill_holes", args.fill_holes))
     median = int(cfg.get("median", args.median))
+    def _parse_cls_skip_threshold(value):
+        if value is None:
+            return float(DEFAULT_CLS_SKIP_THRESHOLD)
+        if isinstance(value, str):
+            text = value.strip().lower()
+            if text == "auto":
+                return None
+            if text == "":
+                return float(DEFAULT_CLS_SKIP_THRESHOLD)
+            return float(text)
+        return float(value)
+
     cfg_cls_skip = cfg.get("cls_skip_threshold", args.cls_skip_threshold)
-    cls_skip_threshold = float(cfg_cls_skip) if cfg_cls_skip is not None else 0.0
+    cls_skip_threshold = _parse_cls_skip_threshold(cfg_cls_skip)
     top_k_per_model = int(cfg.get("top_k_per_model", args.top_k_per_model))
 
     seg_entries = _load_seg_models(
@@ -449,19 +468,24 @@ def main() -> None:
         allow_empty=fallback_authentic,
     )
     if not seg_entries:
-        print("[SEG] sem checkpoints carregados; gerando submission baseline 'authentic'.")
-        _write_authentic_submission(out_path, samples)
-        print("wrote:", out_path)
-        return
+        raise RuntimeError("[SEG] sem checkpoints carregados; execução encerrada.")
 
     cls_models: list[nn.Module] = []
     cls_image_size = 0
-    if float(cls_skip_threshold) <= 0.0:
+    cls_thresholds: list[float] = []
+    if cls_skip_threshold is not None and float(cls_skip_threshold) <= 0.0:
         print("[CLS] gate disabled (cls_skip_threshold<=0).")
-    elif cls_models_dir is not None and cls_models_dir.exists():
-        cls_models, cls_image_size = _load_cls_models(cls_models_dir, device)
     else:
-        print("[CLS] gate enabled but no classifier checkpoints found; running segmentation for all samples.")
+        if cls_models_dir is None or not cls_models_dir.exists():
+            raise RuntimeError("[CLS] gate enabled but no classifier checkpoints found.")
+        cls_models, cls_image_size, cls_thresholds = _load_cls_models(cls_models_dir, device)
+        if not cls_models:
+            raise RuntimeError("[CLS] gate enabled but no classifier checkpoints found.")
+        if cls_skip_threshold is None:
+            if not cls_thresholds:
+                raise RuntimeError("[CLS] cls_skip_threshold=auto but checkpoints lack cls_threshold.")
+            cls_skip_threshold = float(np.median(cls_thresholds))
+            print(f"[CLS] auto threshold from checkpoints: {cls_skip_threshold:.4f}")
 
     with out_path.open("w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=["case_id", "annotation"])
@@ -487,9 +511,15 @@ def main() -> None:
             instances = prob_to_instances(
                 prob,
                 threshold=threshold,
+                adaptive_threshold=adaptive_threshold,
+                threshold_factor=threshold_factor,
                 min_area=min_area,
+                min_area_percent=min_area_percent,
+                min_confidence=min_confidence,
                 closing_ksize=closing,
                 closing_iters=closing_iters,
+                opening_ksize=opening,
+                opening_iters=opening_iters,
                 fill_holes_enabled=fill_holes,
                 median_ksize=median,
             )

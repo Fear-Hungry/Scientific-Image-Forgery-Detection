@@ -6,7 +6,7 @@ from typing import Any
 import torch
 from torch import nn
 
-from .models import builders
+from .models import builders, dinov2
 from .models.classifier import build_classifier
 
 
@@ -28,7 +28,7 @@ def build_segmentation_from_config(cfg: dict[str, Any]) -> nn.Module:
     Notes:
     - We force `encoder_weights=None` because checkpoints already include full weights and Kaggle may run offline.
     """
-    backend = str(cfg.get("backend", "smp"))
+    backend = str(cfg.get("backend", "smp")).lower()
     arch = str(cfg.get("arch", cfg.get("model_id", "unetplusplus"))).lower()
     classes = int(cfg.get("classes", 1))
 
@@ -71,6 +71,26 @@ def build_segmentation_from_config(cfg: dict[str, Any]) -> nn.Module:
 
         raise ValueError(f"Unknown SMP segmentation arch: {arch!r}")
 
+    if backend in {"dinov2", "hf"}:
+        model_id = str(
+            cfg.get(
+                "hf_model_id",
+                cfg.get("encoder_name", cfg.get("model_name", "metaresearch/dinov2")),
+            )
+        )
+        return dinov2.build_dinov2_segmenter(
+            model_id=model_id,
+            decoder_channels=cfg.get("decoder_channels", (256, 128, 64)),
+            decoder_dropout=float(cfg.get("decoder_dropout", 0.0)),
+            pretrained=False,
+            freeze_encoder=bool(cfg.get("freeze_encoder", True)),
+            cache_dir=cfg.get("hf_cache_dir") or cfg.get("cache_dir"),
+            local_files_only=bool(cfg.get("local_files_only", True)),
+            revision=cfg.get("hf_revision") or cfg.get("revision"),
+            trust_remote_code=bool(cfg.get("trust_remote_code", False)),
+            torch_dtype=cfg.get("torch_dtype", None),
+        )
+
     if backend == "torchvision":
         # Minimal fallback for older notebooks/configs.
         if "deeplab" not in arch:
@@ -103,15 +123,52 @@ def build_segmentation_from_config(cfg: dict[str, Any]) -> nn.Module:
 
 def build_classifier_from_config(cfg: dict[str, Any]) -> tuple[nn.Module, int]:
     """Build a classifier model matching checkpoint config. Returns (model, image_size)."""
-    backend = str(cfg.get("backend", "timm"))
+    backend = str(cfg.get("backend", "timm")).lower()
     model_name = str(cfg.get("model_name", "tf_efficientnet_b4_ns"))
     image_size = int(cfg.get("image_size", 384))
 
     if backend == "timm":
-        return build_classifier(model_name=model_name, pretrained=False, num_classes=1), image_size
+        return build_classifier(model_name=model_name, pretrained=False, num_classes=1, backend="timm"), image_size
+
+    if backend == "timm_encoder":
+        return (
+            build_classifier(
+                model_name=model_name,
+                pretrained=False,
+                num_classes=1,
+                backend="timm_encoder",
+                feature_index=int(cfg.get("feature_index", -1)),
+                pool=str(cfg.get("pool", "avg")),
+                classifier_hidden=int(cfg.get("classifier_hidden", 0)),
+                classifier_dropout=float(cfg.get("classifier_dropout", 0.0)),
+                freeze_encoder=bool(cfg.get("freeze_encoder", False)),
+            ),
+            image_size,
+        )
+
+    if backend in {"dinov2", "hf"}:
+        model_id = str(cfg.get("hf_model_id", model_name))
+        return (
+            build_classifier(
+                model_name=model_id,
+                pretrained=False,
+                num_classes=1,
+                backend="dinov2",
+                hf_model_id=model_id,
+                classifier_hidden=int(cfg.get("classifier_hidden", 0)),
+                classifier_dropout=float(cfg.get("classifier_dropout", 0.0)),
+                use_cls_token=bool(cfg.get("use_cls_token", True)),
+                freeze_encoder=bool(cfg.get("freeze_encoder", True)),
+                local_files_only=bool(cfg.get("local_files_only", True)),
+                hf_cache_dir=cfg.get("hf_cache_dir") or cfg.get("cache_dir"),
+                hf_revision=cfg.get("hf_revision") or cfg.get("revision"),
+                trust_remote_code=bool(cfg.get("trust_remote_code", False)),
+                torch_dtype=cfg.get("torch_dtype", None),
+            ),
+            image_size,
+        )
 
     if backend == "torchvision":
-        return build_classifier(model_name="resnet50", pretrained=False, num_classes=1), image_size
+        return build_classifier(model_name="resnet50", pretrained=False, num_classes=1, backend="torchvision"), image_size
 
     raise ValueError(f"Unknown classifier backend: {backend!r}")
-

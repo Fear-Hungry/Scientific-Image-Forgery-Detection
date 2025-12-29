@@ -93,6 +93,7 @@ def main() -> None:
     parser.add_argument("--output-dir", default="outputs", help="Output directory")
     parser.add_argument("--folds", type=int, default=5, help="Number of CV folds")
     parser.add_argument("--fold", type=int, default=-1, help="Train a single fold index")
+    parser.add_argument("--patch-size", type=int, default=0, help="Override patch size")
     parser.add_argument("--device", default="", help="Device override (e.g., cuda:0)")
     parser.add_argument("--include-supplemental", action="store_true", help="Include supplemental_images in training")
 
@@ -117,6 +118,9 @@ def main() -> None:
 
     loss_name = cfg.get("loss", "bce_dice")
     patch_size = int(cfg.get("patch_size", 512))
+    if int(args.patch_size) > 0:
+        patch_size = int(args.patch_size)
+        cfg["patch_size"] = int(patch_size)
     batch_size = int(cfg.get("batch_size", 8))
     epochs = int(cfg.get("epochs", 10))
     lr = float(cfg.get("learning_rate", 1e-4))
@@ -153,6 +157,8 @@ def main() -> None:
             copy_move_max_area_frac=float(cfg.get("copy_move_max_area_frac", 0.20)),
             copy_move_rotation_limit=float(cfg.get("copy_move_rotation_limit", 15.0)),
             copy_move_scale_range=copy_move_scale_range,
+            grayscale_prob=float(cfg.get("grayscale_prob", 0.1)),
+            cutout_prob=float(cfg.get("cutout_prob", 0.2)),
         )
         val_aug = get_val_augment()
 

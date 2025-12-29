@@ -1,0 +1,22 @@
+{
+  "model_id": "cls_swin_tiny_encoder",
+  "backend": "timm_encoder",
+  "model_name": "swin_tiny_patch4_window7_224",
+  "image_size": 224,
+  "batch_size": 32,
+  "epochs": 10,
+  "patience": 3,
+  "learning_rate": 0.0003,
+  "weight_decay": 0.01,
+  "num_workers": 2,
+  "use_amp": true,
+  "pretrained": true,
+  "strict_pretrained": true,
+  "feature_index": -1,
+  "pool": "avg",
+  "classifier_hidden": 0,
+  "classifier_dropout": 0.1,
+  "freeze_encoder": false,
+  "seed": 42,
+  "folds": 5
+}

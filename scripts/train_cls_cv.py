@@ -93,6 +93,22 @@ def _eval_classifier(model: nn.Module, loader: DataLoader, criterion: nn.Module,
         out["auc"] = float(roc_auc_score(y_np, probs))
     except Exception:
         out["auc"] = float("nan")
+
+    thresholds = np.linspace(0.05, 0.95, 19)
+    best_f1 = -1.0
+    best_thr = 0.5
+    for thr in thresholds:
+        pred = (probs >= float(thr)).astype(np.int64)
+        tp = int(((pred == 1) & (y_np == 1)).sum())
+        fp = int(((pred == 1) & (y_np == 0)).sum())
+        fn = int(((pred == 0) & (y_np == 1)).sum())
+        denom = (2 * tp + fp + fn)
+        f1 = float((2 * tp) / denom) if denom > 0 else 0.0
+        if f1 > best_f1:
+            best_f1 = f1
+            best_thr = float(thr)
+    out["best_f1"] = float(best_f1)
+    out["best_threshold"] = float(best_thr)
     return out
 
 
@@ -103,6 +119,7 @@ def main() -> None:
     parser.add_argument("--output-dir", default="outputs", help="Output directory")
     parser.add_argument("--folds", type=int, default=5, help="Number of CV folds (overrides config)")
     parser.add_argument("--fold", type=int, default=-1, help="Train a single fold index")
+    parser.add_argument("--image-size", type=int, default=0, help="Override image size")
     parser.add_argument("--device", default="", help="Device override")
     parser.add_argument("--include-supplemental", action="store_true", help="Include supplemental_images in training")
     parser.add_argument("--cache-root", default="", help="Cache root for offline pretrained weights (sets TORCH_HOME/HF_HOME)")
@@ -122,11 +139,14 @@ def main() -> None:
     device = args.device or ("cuda" if torch.cuda.is_available() else "cpu")
     use_amp = bool(cfg.get("use_amp", True)) and str(device).startswith("cuda")
 
+    backend = str(cfg.get("backend", "timm")).lower()
     model_name = str(cfg.get("model_name", "tf_efficientnet_b4_ns"))
     model_id = str(cfg.get("model_id", "cls"))
     pretrained = bool(cfg.get("pretrained", True))
     strict_pretrained = bool(cfg.get("strict_pretrained", False))
     image_size = int(cfg.get("image_size", 384))
+    if int(args.image_size) > 0:
+        image_size = int(args.image_size)
     batch_size = int(cfg.get("batch_size", 32))
     epochs = int(cfg.get("epochs", 10))
     patience = int(cfg.get("patience", 3))
@@ -154,8 +174,15 @@ def main() -> None:
         train_samples = [samples[i] for i in train_idx] + supplemental_samples
         val_samples = [samples[i] for i in val_idx]
 
-        tr_transform = build_classification_transform(image_size=image_size, train=True)
-        va_transform = build_classification_transform(image_size=image_size, train=False)
+        aug_kwargs = {
+            "brightness": float(cfg.get("brightness", 0.2)),
+            "contrast": float(cfg.get("contrast", 0.2)),
+            "grayscale_prob": float(cfg.get("grayscale_prob", 0.1)),
+            "blur_prob": float(cfg.get("blur_prob", 0.1)),
+            "cutout_prob": float(cfg.get("cutout_prob", 0.2)),
+        }
+        tr_transform = build_classification_transform(image_size=image_size, train=True, **aug_kwargs)
+        va_transform = build_classification_transform(image_size=image_size, train=False, **aug_kwargs)
         ds_train = BinaryForgeryClsDataset(train_samples, tr_transform)
         ds_val = BinaryForgeryClsDataset(val_samples, va_transform)
 
@@ -176,15 +203,29 @@ def main() -> None:
             drop_last=False,
         )
 
-        try:
-            model = build_classifier(model_name=model_name, pretrained=pretrained, num_classes=1).to(device)
-        except Exception:
-            if pretrained and not strict_pretrained:
-                print("[CLS] falha ao carregar pesos pré-treinados; fallback para pretrained=False.")
-                traceback.print_exc()
-                model = build_classifier(model_name=model_name, pretrained=False, num_classes=1).to(device)
-            else:
-                raise
+    build_kwargs: dict[str, object] = {}
+    if backend in {"dinov2", "hf"}:
+        build_kwargs = {
+            "hf_model_id": cfg.get("hf_model_id", model_name),
+            "hf_cache_dir": cfg.get("hf_cache_dir", None),
+            "hf_revision": cfg.get("hf_revision", None),
+            "local_files_only": bool(cfg.get("local_files_only", False)),
+            "freeze_encoder": bool(cfg.get("freeze_encoder", True)),
+            "classifier_hidden": int(cfg.get("classifier_hidden", 0)),
+            "classifier_dropout": float(cfg.get("classifier_dropout", 0.0)),
+            "use_cls_token": bool(cfg.get("use_cls_token", True)),
+            "trust_remote_code": bool(cfg.get("trust_remote_code", False)),
+            "torch_dtype": cfg.get("torch_dtype", None),
+        }
+    elif backend == "timm_encoder":
+        build_kwargs = {
+            "feature_index": int(cfg.get("feature_index", -1)),
+            "pool": cfg.get("pool", "avg"),
+            "classifier_hidden": int(cfg.get("classifier_hidden", 0)),
+            "classifier_dropout": float(cfg.get("classifier_dropout", 0.0)),
+            "freeze_encoder": bool(cfg.get("freeze_encoder", False)),
+        }
+        model = build_classifier(model_name=model_name, pretrained=pretrained, num_classes=1, backend=backend, **build_kwargs).to(device)
 
         pos_weight = torch.tensor(compute_pos_weight(labels[train_idx]), dtype=torch.float32, device=device)
         criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
@@ -196,7 +237,18 @@ def main() -> None:
         ckpt_path = fold_dir / "best.pt"
         log_path = fold_dir / "train_log.csv"
         with log_path.open("w", newline="") as f:
-            writer = csv.DictWriter(f, fieldnames=["epoch", "train_loss", "val_loss", "val_acc@0.5", "val_auc"])
+            writer = csv.DictWriter(
+                f,
+                fieldnames=[
+                    "epoch",
+                    "train_loss",
+                    "val_loss",
+                    "val_acc@0.5",
+                    "val_auc",
+                    "val_best_f1",
+                    "val_best_threshold",
+                ],
+            )
             writer.writeheader()
 
         best_score = -1.0
@@ -224,7 +276,18 @@ def main() -> None:
                 score = -float(val["loss"])
 
             with log_path.open("a", newline="") as f:
-                writer = csv.DictWriter(f, fieldnames=["epoch", "train_loss", "val_loss", "val_acc@0.5", "val_auc"])
+                writer = csv.DictWriter(
+                    f,
+                    fieldnames=[
+                        "epoch",
+                        "train_loss",
+                        "val_loss",
+                        "val_acc@0.5",
+                        "val_auc",
+                        "val_best_f1",
+                        "val_best_threshold",
+                    ],
+                )
                 writer.writerow(
                     {
                         "epoch": int(epoch),
@@ -232,6 +295,8 @@ def main() -> None:
                         "val_loss": float(val["loss"]),
                         "val_acc@0.5": float(val["acc@0.5"]),
                         "val_auc": float(val.get("auc", float("nan"))),
+                        "val_best_f1": float(val.get("best_f1", float("nan"))),
+                        "val_best_threshold": float(val.get("best_threshold", float("nan"))),
                     }
                 )
 
@@ -240,17 +305,44 @@ def main() -> None:
             if score > best_score:
                 best_score = float(score)
                 best_epoch = int(epoch)
+                ckpt_config = {
+                    "backend": backend,
+                    "model_id": model_id,
+                    "model_name": model_name,
+                    "image_size": int(image_size),
+                    "pretrained": bool(pretrained),
+                    "cls_threshold": float(val.get("best_threshold", 0.5)),
+                    "fold": int(fold_id),
+                    "seed": int(seed),
+                }
+                if backend in {"dinov2", "hf"}:
+                    ckpt_config.update(
+                        {
+                            "hf_model_id": cfg.get("hf_model_id", model_name),
+                            "hf_cache_dir": cfg.get("hf_cache_dir", None),
+                            "hf_revision": cfg.get("hf_revision", None),
+                            "local_files_only": bool(cfg.get("local_files_only", False)),
+                            "freeze_encoder": bool(cfg.get("freeze_encoder", True)),
+                            "classifier_hidden": int(cfg.get("classifier_hidden", 0)),
+                            "classifier_dropout": float(cfg.get("classifier_dropout", 0.0)),
+                            "use_cls_token": bool(cfg.get("use_cls_token", True)),
+                            "trust_remote_code": bool(cfg.get("trust_remote_code", False)),
+                            "torch_dtype": cfg.get("torch_dtype", None),
+                        }
+                    )
+                elif backend == "timm_encoder":
+                    ckpt_config.update(
+                        {
+                            "feature_index": int(cfg.get("feature_index", -1)),
+                            "pool": cfg.get("pool", "avg"),
+                            "classifier_hidden": int(cfg.get("classifier_hidden", 0)),
+                            "classifier_dropout": float(cfg.get("classifier_dropout", 0.0)),
+                            "freeze_encoder": bool(cfg.get("freeze_encoder", False)),
+                        }
+                    )
                 ckpt = {
                     "model_state": model.state_dict(),
-                    "config": {
-                        "backend": "timm",
-                        "model_id": model_id,
-                        "model_name": model_name,
-                        "image_size": int(image_size),
-                        "pretrained": bool(pretrained),
-                        "fold": int(fold_id),
-                        "seed": int(seed),
-                    },
+                    "config": ckpt_config,
                     "score": float(best_score),
                 }
                 torch.save(ckpt, ckpt_path)
@@ -265,4 +357,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

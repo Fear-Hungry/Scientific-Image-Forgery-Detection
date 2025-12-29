@@ -4,6 +4,7 @@ __all__ = [
     "builders",
     "classifier",
     "correlation",
+    "dinov2",
     "ensemble",
     "fpn_convnext",
 ]

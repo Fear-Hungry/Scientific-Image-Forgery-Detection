@@ -21,7 +21,7 @@ sys.path.insert(0, str(SRC_ROOT))
 from forgeryseg.augment import get_train_augment, get_val_augment
 from forgeryseg.dataset import PatchDataset, build_supplemental_index, build_train_index
 from forgeryseg.losses import BCEDiceLoss, BCETverskyLoss
-from forgeryseg.models import builders
+from forgeryseg.models import builders, dinov2
 from forgeryseg.offline import configure_cache_dirs
 from forgeryseg.train import train_one_epoch, validate
 
@@ -77,43 +77,63 @@ def _build_criterion(name: str, cfg: dict) -> nn.Module:
 
 
 def _build_seg_model(cfg: dict) -> nn.Module:
-    arch = str(cfg.get("arch", "unetplusplus")).lower()
-    encoder_name = str(cfg.get("encoder_name", "tu-convnext_small"))
-    encoder_weights = cfg.get("encoder_weights", "imagenet")
-    if encoder_weights == "":
-        encoder_weights = None
+    backend = str(cfg.get("backend", "smp")).lower()
     classes = int(cfg.get("classes", 1))
-    strict_weights = bool(cfg.get("strict_weights", False))
 
-    if arch == "unet":
-        return builders.build_unet(
-            encoder_name=encoder_name,
-            encoder_weights=encoder_weights,
-            classes=classes,
-            strict_weights=strict_weights,
+    if backend == "smp":
+        arch = str(cfg.get("arch", "unetplusplus")).lower()
+        encoder_name = str(cfg.get("encoder_name", "tu-convnext_small"))
+        encoder_weights = cfg.get("encoder_weights", "imagenet")
+        if encoder_weights == "":
+            encoder_weights = None
+        strict_weights = bool(cfg.get("strict_weights", False))
+
+        if arch == "unet":
+            return builders.build_unet(
+                encoder_name=encoder_name,
+                encoder_weights=encoder_weights,
+                classes=classes,
+                strict_weights=strict_weights,
+            )
+        if arch in {"unetplusplus", "unetpp"}:
+            return builders.build_unetplusplus(
+                encoder_name=encoder_name,
+                encoder_weights=encoder_weights,
+                classes=classes,
+                strict_weights=strict_weights,
+            )
+        if arch in {"deeplabv3plus", "deeplabv3+", "deeplabv3p"}:
+            return builders.build_deeplabv3plus(
+                encoder_name=encoder_name,
+                encoder_weights=encoder_weights,
+                classes=classes,
+                strict_weights=strict_weights,
+            )
+        if arch in {"segformer", "mit"}:
+            return builders.build_segformer(
+                encoder_name=encoder_name,
+                encoder_weights=encoder_weights,
+                classes=classes,
+                strict_weights=strict_weights,
+            )
+        raise ValueError(f"Unknown SMP arch {arch!r}")
+
+    if backend in {"dinov2", "hf"}:
+        model_id = str(cfg.get("hf_model_id", cfg.get("encoder_name", "metaresearch/dinov2")))
+        return dinov2.build_dinov2_segmenter(
+            model_id=model_id,
+            decoder_channels=cfg.get("decoder_channels", (256, 128, 64)),
+            decoder_dropout=float(cfg.get("decoder_dropout", 0.0)),
+            pretrained=bool(cfg.get("pretrained", True)),
+            freeze_encoder=bool(cfg.get("freeze_encoder", True)),
+            cache_dir=cfg.get("hf_cache_dir") or cfg.get("cache_dir"),
+            local_files_only=bool(cfg.get("local_files_only", False)),
+            revision=cfg.get("hf_revision") or cfg.get("revision"),
+            trust_remote_code=bool(cfg.get("trust_remote_code", False)),
+            torch_dtype=cfg.get("torch_dtype", None),
         )
-    if arch in {"unetplusplus", "unetpp"}:
-        return builders.build_unetplusplus(
-            encoder_name=encoder_name,
-            encoder_weights=encoder_weights,
-            classes=classes,
-            strict_weights=strict_weights,
-        )
-    if arch in {"deeplabv3plus", "deeplabv3+", "deeplabv3p"}:
-        return builders.build_deeplabv3plus(
-            encoder_name=encoder_name,
-            encoder_weights=encoder_weights,
-            classes=classes,
-            strict_weights=strict_weights,
-        )
-    if arch in {"segformer", "mit"}:
-        return builders.build_segformer(
-            encoder_name=encoder_name,
-            encoder_weights=encoder_weights,
-            classes=classes,
-            strict_weights=strict_weights,
-        )
-    raise ValueError(f"Unknown SMP arch {arch!r}")
+
+    raise ValueError(f"Unknown segmentation backend {backend!r}")
 
 
 def _write_split(path: Path, train_idx: List[int], val_idx: List[int], samples) -> None:
@@ -135,6 +155,7 @@ def main() -> None:
     parser.add_argument("--output-dir", default="outputs", help="Output directory")
     parser.add_argument("--folds", type=int, default=5, help="Number of CV folds (overrides config)")
     parser.add_argument("--fold", type=int, default=-1, help="Train a single fold index")
+    parser.add_argument("--patch-size", type=int, default=0, help="Override patch size")
     parser.add_argument("--device", default="", help="Device override (e.g. cuda:0)")
     parser.add_argument("--include-supplemental", action="store_true", help="Include supplemental_images in training")
     parser.add_argument("--cache-root", default="", help="Cache root for offline pretrained weights (sets TORCH_HOME/HF_HOME)")
@@ -172,6 +193,9 @@ def main() -> None:
         folds = [folds[args.fold]]
 
     patch_size = int(cfg.get("patch_size", 512))
+    if int(args.patch_size) > 0:
+        patch_size = int(args.patch_size)
+        cfg["patch_size"] = int(patch_size)
     batch_size = int(cfg.get("batch_size", 8))
     epochs = int(cfg.get("epochs", 10))
     patience = int(cfg.get("patience", 3))
@@ -196,6 +220,8 @@ def main() -> None:
         copy_move_max_area_frac=float(cfg.get("copy_move_max_area_frac", 0.20)),
         copy_move_rotation_limit=float(cfg.get("copy_move_rotation_limit", 15.0)),
         copy_move_scale_range=copy_move_scale_range,
+        grayscale_prob=float(cfg.get("grayscale_prob", 0.1)),
+        cutout_prob=float(cfg.get("cutout_prob", 0.2)),
     )
     val_aug = get_val_augment()
 
@@ -246,16 +272,12 @@ def main() -> None:
 
         model_cfg = dict(cfg)
         model_cfg["classes"] = 1
+        model_cfg.setdefault("backend", "smp")
+        backend = str(model_cfg.get("backend", "smp")).lower()
+        if backend in {"dinov2", "hf"} and "arch" not in model_cfg:
+            model_cfg["arch"] = "dinov2"
 
-        try:
-            model = _build_seg_model(model_cfg).to(device)
-        except Exception:
-            if model_cfg.get("encoder_weights") is not None:
-                print(f"[SEG {model_id}] falha ao usar encoder_weights={model_cfg.get('encoder_weights')!r}; fallback para None.")
-                model_cfg["encoder_weights"] = None
-                model = _build_seg_model(model_cfg).to(device)
-            else:
-                raise
+        model = _build_seg_model(model_cfg).to(device)
 
         optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
 
@@ -295,19 +317,28 @@ def main() -> None:
             if float(val_dice) > best_dice:
                 best_dice = float(val_dice)
                 best_epoch = int(epoch)
-                ckpt = {
-                    "model_state": model.state_dict(),
-                    "config": {
-                        "backend": "smp",
-                        "arch": str(model_cfg.get("arch", "unetplusplus")),
-                        "encoder_name": str(model_cfg.get("encoder_name", "")),
-                        "encoder_weights": model_cfg.get("encoder_weights", None),
+                ckpt_config = dict(model_cfg)
+                ckpt_config.update(
+                    {
+                        "backend": backend,
                         "classes": 1,
                         "model_id": model_id,
                         "patch_size": int(patch_size),
                         "fold": int(fold_id),
                         "seed": int(seed),
-                    },
+                    }
+                )
+                if backend == "smp":
+                    ckpt_config.update(
+                        {
+                            "arch": str(model_cfg.get("arch", "unetplusplus")),
+                            "encoder_name": str(model_cfg.get("encoder_name", "")),
+                            "encoder_weights": model_cfg.get("encoder_weights", None),
+                        }
+                    )
+                ckpt = {
+                    "model_state": model.state_dict(),
+                    "config": ckpt_config,
                     "score": float(best_dice),
                 }
                 torch.save(ckpt, ckpt_path)

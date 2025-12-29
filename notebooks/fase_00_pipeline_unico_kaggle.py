@@ -823,6 +823,11 @@ if DINO_ONLY:
     except Exception:
         print("[ERRO] OpenCV (cv2) não disponível. Instale ou inclua no bundle.")
         raise
+    try:
+        from PIL import Image
+    except Exception:
+        print("[ERRO] Pillow (PIL) não disponível. Inclua no bundle offline.")
+        raise
 
     def _parse_version_tuple(ver: str) -> tuple[int, ...]:
         parts = []

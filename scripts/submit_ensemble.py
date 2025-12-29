@@ -120,6 +120,55 @@ def _undo_tta(mask: np.ndarray, mode: str) -> np.ndarray:
     raise ValueError(f"tta mode inválido: {mode}")
 
 
+def _find_checkpoint_paths(models_dir: Path) -> tuple[str, list[Path]]:
+    """
+    Return (pattern_used, paths) for segmentation checkpoints inside `models_dir`.
+
+    We prefer the standard training layout used by this repo:
+    - outputs/models_seg/<model_id>/fold_<k>/best.pt  -> "*/*/best.pt"
+
+    But we also accept alternative layouts (common when users copy files around):
+    - outputs/models_seg/<model_id>/best.pt           -> "*/best.pt"
+    - outputs/models_seg/**/best.pt                   -> "**/best.pt"
+
+    As a last resort we also look for "last.pt" with the same patterns.
+    """
+    patterns = [
+        "*/*/best.pt",
+        "*/best.pt",
+        "**/best.pt",
+        "*/*/last.pt",
+        "*/last.pt",
+        "**/last.pt",
+    ]
+    for pat in patterns:
+        matches = sorted(models_dir.glob(pat))
+        if matches:
+            return pat, matches
+    return "", []
+
+
+def _infer_model_id_from_path(models_dir: Path, ckpt_path: Path) -> str:
+    try:
+        rel = ckpt_path.relative_to(models_dir)
+        parts = rel.parts
+    except Exception:
+        parts = ckpt_path.parts
+
+    if not parts:
+        return ckpt_path.parent.parent.name
+
+    # Common layouts:
+    # - <model_id>/fold_0/best.pt
+    # - <model_id>/fold_0/weights/best.pt
+    if len(parts) >= 1 and not str(parts[0]).startswith("fold_"):
+        return str(parts[0])
+
+    # If models_dir already points at "<model_id>", we likely have:
+    # - fold_0/best.pt
+    return models_dir.name
+
+
 def _load_seg_models(
     models_dir: Path,
     device: str,
@@ -127,13 +176,19 @@ def _load_seg_models(
     model_ids: list[str] | None,
     model_weights: dict[str, float],
     top_k_per_model: int,
+    allow_empty: bool = False,
 ) -> list[SegEntry]:
     entries: list[SegEntry] = []
-    for ckpt_path in sorted(models_dir.glob("*/*/best.pt")):
+    pattern, ckpt_paths = _find_checkpoint_paths(models_dir)
+    if pattern:
+        print(f"[SEG] scanning checkpoints: {models_dir} (pattern: {pattern})")
+    model_ids_set = set(model_ids) if model_ids else None
+
+    for ckpt_path in ckpt_paths:
         try:
             state, cfg = load_checkpoint(ckpt_path)
-            model_id = str(cfg.get("model_id", ckpt_path.parent.parent.name))
-            if model_ids and model_id not in set(model_ids):
+            model_id = str(cfg.get("model_id") or _infer_model_id_from_path(models_dir, ckpt_path))
+            if model_ids_set and model_id not in model_ids_set:
                 continue
             score = cfg.get("score", None)
             if score is None:
@@ -154,7 +209,21 @@ def _load_seg_models(
             traceback.print_exc()
 
     if not entries:
-        raise RuntimeError(f"Nenhum checkpoint encontrado em {models_dir} (pattern: */*/best.pt).")
+        tried = ", ".join(
+            [
+                "*/*/best.pt",
+                "*/best.pt",
+                "**/best.pt",
+                "*/*/last.pt",
+                "*/last.pt",
+                "**/last.pt",
+            ]
+        )
+        msg = f"Nenhum checkpoint encontrado em {models_dir} (patterns testados: {tried})."
+        if allow_empty:
+            print("[SEG]", msg)
+            return []
+        raise RuntimeError(msg)
 
     if top_k_per_model > 0:
         by_id: dict[str, list[SegEntry]] = {}
@@ -246,6 +315,14 @@ def predict_seg_ensemble_prob(
     return prob_sum / float(max(count, 1))
 
 
+def _write_authentic_submission(out_path: Path, samples: Iterable) -> None:
+    with out_path.open("w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=["case_id", "annotation"])
+        writer.writeheader()
+        for s in samples:
+            writer.writerow({"case_id": s.case_id, "annotation": AUTHENTIC_LABEL})
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Ensemble inference (segmentation + optional classifier gating) -> submission.csv")
     parser.add_argument("--data-root", default="data/recodai", help="Dataset root")
@@ -273,6 +350,20 @@ def main() -> None:
     )
     parser.add_argument("--device", default="", help="Device override")
     parser.add_argument("--limit", type=int, default=0, help="Limit number of test samples (debug)")
+    fb = parser.add_mutually_exclusive_group()
+    fb.add_argument(
+        "--fallback-authentic",
+        dest="fallback_authentic",
+        action="store_true",
+        help="If no segmentation checkpoints are found, write an 'authentic' submission and exit 0.",
+    )
+    fb.add_argument(
+        "--no-fallback-authentic",
+        dest="fallback_authentic",
+        action="store_false",
+        help="Disable Kaggle default fallback behavior when checkpoints are missing.",
+    )
+    parser.set_defaults(fallback_authentic=None)
     args = parser.parse_args()
 
     cfg = {}
@@ -292,7 +383,18 @@ def main() -> None:
     out_path = Path(out_csv)
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
-    models_dir = _find_models_dir("models_seg", cfg.get("models_dir", args.models_dir) or None)
+    cfg_fallback = cfg.get("fallback_authentic", args.fallback_authentic)
+    fallback_authentic = is_kaggle() if cfg_fallback is None else bool(cfg_fallback)
+
+    try:
+        models_dir = _find_models_dir("models_seg", cfg.get("models_dir", args.models_dir) or None)
+    except FileNotFoundError:
+        if fallback_authentic:
+            print("[SEG] outputs/models_seg não encontrado; gerando submission baseline 'authentic'.")
+            _write_authentic_submission(out_path, samples)
+            print("wrote:", out_path)
+            return
+        raise
     cls_models_dir = None
     cls_dir_text = cfg.get("cls_models_dir", args.cls_models_dir) or ""
     if cls_dir_text:
@@ -344,7 +446,13 @@ def main() -> None:
         model_ids=model_ids or None,
         model_weights=model_weights,
         top_k_per_model=top_k_per_model,
+        allow_empty=fallback_authentic,
     )
+    if not seg_entries:
+        print("[SEG] sem checkpoints carregados; gerando submission baseline 'authentic'.")
+        _write_authentic_submission(out_path, samples)
+        print("wrote:", out_path)
+        return
 
     cls_models: list[nn.Module] = []
     cls_image_size = 0

@@ -1011,6 +1011,16 @@ def _find_models_dir_with_ckpt() -> Path | None:
     for cand in candidates:
         if any(cand.glob("*/*/best.pt")):
             return cand
+        if any(cand.glob("*/best.pt")):
+            return cand
+        if any(cand.glob("**/best.pt")):
+            return cand
+        if any(cand.glob("*/*/last.pt")):
+            return cand
+        if any(cand.glob("*/last.pt")):
+            return cand
+        if any(cand.glob("**/last.pt")):
+            return cand
     return None
 
 
@@ -1042,7 +1052,9 @@ if RUN_SUBMISSION_SCRIPT:
             subprocess.check_call(cmd)
             print("[SUBMISSION] wrote:", submission_path)
         else:
-            print("[SUBMISSION] nenhum checkpoint encontrado; pulando submit_ensemble.py.")
+            print("[SUBMISSION] nenhum checkpoint encontrado; gerando baseline 'authentic'.")
+            submission_path = _write_submission_csv(submissions)
+            print("[SUBMISSION] wrote fallback:", submission_path)
             RUN_SUBMISSION_SIMPLE = True
     except Exception:
         print("[SUBMISSION] erro ao rodar submit_ensemble.py; fallback para baseline 'authentic'.")

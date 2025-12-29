@@ -1,26 +1,27 @@
 {
   "tta_modes": [
     "none",
-    "hflip"
+    "hflip",
+    "vflip"
   ],
   "tile_size": 1024,
   "overlap": 128,
   "max_size": 0,
   "threshold": 0.5,
   "min_area": 32,
-  "cls_skip_threshold": 0.0,
+  "cls_skip_threshold": 0.3,
   "models": [
     {
-      "model_id": "unet_tu_convnext_small",
-      "weight": 1.0
+      "model_id": "unetpp_effnet_b7",
+      "weight": 0.4
     },
     {
       "model_id": "deeplabv3p_tu_resnest101e",
-      "weight": 1.0
+      "weight": 0.4
     },
     {
-      "model_id": "segformer_mit_b2",
-      "weight": 1.0
+      "model_id": "segformer_mit_b3",
+      "weight": 0.2
     }
   ]
 }

@@ -10,15 +10,13 @@
 # ---
 
 # %% [markdown]
-# # Treinamento — Fases 1→3 (Kaggle / Offline)
+# # Treino + Submissão — Pipeline Kaggle (Offline)
 #
-# Este notebook mantém **apenas o treinamento**:
+# Este notebook é focado em **submissão no Kaggle** (internet OFF) e **treina por padrão**:
 #
 # 1) **Setup offline + checagens**
-# 2) **Treino do classificador** (authentic vs forged) *(opcional)*
-# 3) **Treino do segmentador** (máscara de duplicação) *(opcional)*
-#
-# Para **inferência/submissão**, use os scripts em `scripts/` (ex.: `scripts/infer_submit.py`).
+# 2) **Treino** (classificador + segmentadores)
+# 3) **Inferência + `submission.csv`** via `scripts/submit_ensemble.py`
 #
 # ## Regras / Decisões
 # - Importa código do projeto em `src/forgeryseg/` (modularizado).
@@ -92,6 +90,12 @@ print("device:", DEVICE)
 #
 # Observação: instalamos com `--no-deps` para não tentar instalar dependências do torch offline.
 import subprocess
+
+_install_wheels_env = os.environ.get("FORGERYSEG_INSTALL_WHEELS", "")
+if _install_wheels_env == "":
+    INSTALL_WHEELS = bool(is_kaggle())
+else:
+    INSTALL_WHEELS = _install_wheels_env.strip().lower() in {"1", "true", "yes", "y", "on"}
 
 
 def _find_offline_bundle() -> Path | None:
@@ -180,7 +184,9 @@ def add_local_package_to_syspath(package_dir_name: str) -> list[Path]:
 
 
 OFFLINE_BUNDLE = _find_offline_bundle()
-if OFFLINE_BUNDLE is None:
+if not INSTALL_WHEELS:
+    print("[OFFLINE INSTALL] FORGERYSEG_INSTALL_WHEELS=0; pulando instalação de wheels.")
+elif OFFLINE_BUNDLE is None:
     print("[OFFLINE INSTALL] nenhum bundle com `wheels/` encontrado em `/kaggle/input`.")
 else:
     wheel_dir = OFFLINE_BUNDLE / "wheels"
@@ -202,8 +208,12 @@ else:
             *whls,
         ]
         print("[OFFLINE INSTALL] executando:", " ".join(cmd[:9]), "...", f"(+{len(whls)} wheels)")
-        subprocess.check_call(cmd)
-        print("[OFFLINE INSTALL] OK.")
+        try:
+            subprocess.check_call(cmd)
+            print("[OFFLINE INSTALL] OK.")
+        except Exception:
+            print("[OFFLINE INSTALL] falhou; seguindo sem wheels. Verifique compatibilidade das wheels.")
+            traceback.print_exc()
 
 # %%
 # Fase 1 — Célula 2c: Import do projeto (src/forgeryseg)
@@ -323,11 +333,12 @@ def _env_bool(name: str, default: bool) -> bool:
 
 
 ALLOW_DOWNLOAD = _env_bool("FORGERYSEG_ALLOW_DOWNLOAD", default=not is_kaggle())
-OFFLINE_NO_DOWNLOAD = bool(is_kaggle() and not CACHE_ROOT and not ALLOW_DOWNLOAD)
+# No Kaggle, a internet é OFF por padrão. Permita downloads apenas se o usuário pedir explicitamente.
+OFFLINE_NO_DOWNLOAD = bool(is_kaggle() and not ALLOW_DOWNLOAD)
 if OFFLINE_NO_DOWNLOAD:
     os.environ.setdefault("HF_HUB_OFFLINE", "1")
     os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
-    print("[OFFLINE] downloads disabled (no cache).")
+    print("[OFFLINE] downloads disabled (Kaggle offline).")
 
 
 N_FOLDS = int(os.environ.get("FORGERYSEG_N_FOLDS", "5"))
@@ -339,6 +350,7 @@ print("FAST_TRAIN:", FAST_TRAIN)
 print("HAS_SEG_CKPT:", HAS_SEG_CKPT)
 print("HAS_CLS_CKPT:", HAS_CLS_CKPT)
 
+# Em notebook de submissão Kaggle, por padrão TREINAMOS.
 RUN_TRAIN_CLS = _env_bool("FORGERYSEG_RUN_TRAIN_CLS", default=True)
 RUN_TRAIN_SEG = _env_bool("FORGERYSEG_RUN_TRAIN_SEG", default=True)
 
@@ -389,14 +401,18 @@ IMAGENET_STD = (0.229, 0.224, 0.225)
 CLS_MODEL_NAME = "tf_efficientnet_b4_ns"
 CLS_IMAGE_SIZE = 384
 CLS_BATCH_SIZE = 32
-CLS_EPOCHS = 10
+CLS_EPOCHS = int(os.environ.get("FORGERYSEG_CLS_EPOCHS", "15"))
 CLS_PATIENCE = 3
 CLS_LR = 3e-4
 CLS_WEIGHT_DECAY = 1e-2
 # Preferir recall (evitar falsos negativos): só pule a segmentação quando tiver alta confiança de autenticidade.
-CLS_SKIP_THRESHOLD = 0.10
-# Pesos pré-treinados ajudam, mas no Kaggle com internet OFF podem não estar disponíveis.
-CLS_PRETRAINED = not OFFLINE_NO_DOWNLOAD
+CLS_SKIP_THRESHOLD = float(os.environ.get("FORGERYSEG_CLS_SKIP_THRESHOLD", "0.30"))
+# Scheduler (PDF sugere ReduceLROnPlateau ou cosine; usamos ReduceLROnPlateau por padrão).
+CLS_USE_SCHEDULER = _env_bool("FORGERYSEG_CLS_USE_SCHEDULER", default=True)
+CLS_LR_SCHED_PATIENCE = int(os.environ.get("FORGERYSEG_CLS_LR_SCHED_PATIENCE", "2"))
+CLS_LR_SCHED_FACTOR = float(os.environ.get("FORGERYSEG_CLS_LR_SCHED_FACTOR", "0.5"))
+# Pesos pré-treinados ajudam; em Kaggle offline usamos cache local e fazemos fallback se faltar.
+CLS_PRETRAINED = _env_bool("FORGERYSEG_CLS_PRETRAINED", default=True)
 
 
 def build_transform(train: bool) -> T.Compose:
@@ -450,6 +466,14 @@ if RUN_TRAIN_CLS:
         pos_weight = torch.tensor(compute_pos_weight(train_labels[train_idx]), dtype=torch.float32, device=DEVICE)
         cls_criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
         cls_optimizer = torch.optim.AdamW(cls_model.parameters(), lr=CLS_LR, weight_decay=CLS_WEIGHT_DECAY)
+        cls_scheduler = None
+        if CLS_USE_SCHEDULER:
+            cls_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+                cls_optimizer,
+                mode="min",
+                patience=int(CLS_LR_SCHED_PATIENCE),
+                factor=float(CLS_LR_SCHED_FACTOR),
+            )
         cls_scaler = torch.cuda.amp.GradScaler(enabled=(DEVICE == "cuda"))
     
         @torch.no_grad()
@@ -507,6 +531,8 @@ if RUN_TRAIN_CLS:
         for epoch in range(1, int(CLS_EPOCHS) + 1):
             tr_loss = cls_train_one_epoch()
             val = cls_eval()
+            if cls_scheduler is not None:
+                cls_scheduler.step(float(val["loss"]))
             score = float(val.get("auc", -val["loss"]))
             print(f"[CLS] epoch {epoch:02d}/{CLS_EPOCHS} | train_loss={tr_loss:.4f} | val={val}")
             if score > best_score:
@@ -539,25 +565,45 @@ else:
 
 # %%
 # Fase 3 — Célula 7: Treino de segmentação (opcional)
-SEG_PATCH_SIZE = 384
+SEG_PATCH_SIZE = int(os.environ.get("FORGERYSEG_SEG_PATCH_SIZE", "512"))
 SEG_COPY_MOVE_PROB = 0.20
-SEG_BATCH_SIZE = 8
-SEG_EPOCHS = 8
+SEG_BATCH_SIZE = int(os.environ.get("FORGERYSEG_SEG_BATCH_SIZE", "4"))
+SEG_EPOCHS = int(os.environ.get("FORGERYSEG_SEG_EPOCHS", "40"))
 SEG_LR = 1e-3
 SEG_WEIGHT_DECAY = 1e-2
 SEG_PATIENCE = 3
+# Scheduler (PDF sugere ReduceLROnPlateau ou cosine; usamos ReduceLROnPlateau por padrão).
+SEG_USE_SCHEDULER = _env_bool("FORGERYSEG_SEG_USE_SCHEDULER", default=True)
+SEG_LR_SCHED_PATIENCE = int(os.environ.get("FORGERYSEG_SEG_LR_SCHED_PATIENCE", "2"))
+SEG_LR_SCHED_FACTOR = float(os.environ.get("FORGERYSEG_SEG_LR_SCHED_FACTOR", "0.5"))
 # Pesos pré-treinados: preferível (offline via cache); fallback para None se falhar.
-SEG_ENCODER_WEIGHTS = "imagenet"
-if OFFLINE_NO_DOWNLOAD:
+_seg_weights_env = os.environ.get("FORGERYSEG_SEG_ENCODER_WEIGHTS", "imagenet")
+if str(_seg_weights_env).strip().lower() in {"", "none", "null", "false", "0"}:
     SEG_ENCODER_WEIGHTS = None
+else:
+    SEG_ENCODER_WEIGHTS = str(_seg_weights_env)
 
 # Para performance máxima, treine mais de uma arquitetura e faça ensemble na inferência.
+# Preset inspirado no PDF "Pipeline Completo..." (Unet++ + DeepLabV3+ + SegFormer).
 SEG_TRAIN_SPECS = [
-    # SMP Unet++ + timm Universal ConvNeXt (tu-convnext_*) está quebrado no SMP 0.5.x (gera convs com out_channels=0).
-    # Usamos Unet (ConvNeXt) como base estável.
-    {"model_id": "unet_tu_convnext_small", "arch": "unet", "encoder_name": "tu-convnext_small"},
-    {"model_id": "deeplabv3p_tu_resnest101e", "arch": "deeplabv3plus", "encoder_name": "tu-resnest101e"},
-    {"model_id": "segformer_mit_b2", "arch": "segformer", "encoder_name": "mit_b2"},
+    {
+        "model_id": "unetpp_effnet_b7",
+        "arch": "unetplusplus",
+        "encoder_name": "efficientnet-b7",
+        "encoder_fallback": "efficientnet-b4",
+    },
+    {
+        "model_id": "deeplabv3p_tu_resnest101e",
+        "arch": "deeplabv3plus",
+        "encoder_name": "tu-resnest101e",
+        "encoder_fallback": "resnet101",
+    },
+    {
+        "model_id": "segformer_mit_b3",
+        "arch": "segformer",
+        "encoder_name": "mit_b3",
+        "encoder_fallback": "mit_b2",
+    },
 ]
 
 if FAST_TRAIN:
@@ -621,11 +667,26 @@ if RUN_TRAIN_SEG:
                 )
             raise ValueError(f"SEG arch inválida: {arch!r}")
     
+        try:
+            available_encoders = set(builders.available_encoders())
+        except Exception:
+            available_encoders = set()
+
         for spec in SEG_TRAIN_SPECS:
             model_id = str(spec["model_id"])
             arch = str(spec.get("arch", "unetplusplus"))
             encoder_name = str(spec.get("encoder_name", "efficientnet-b4"))
+            encoder_fallback = spec.get("encoder_fallback", None)
             encoder_weights: str | None = spec.get("encoder_weights", SEG_ENCODER_WEIGHTS)
+
+            if available_encoders and encoder_name not in available_encoders:
+                if encoder_fallback and str(encoder_fallback) in available_encoders:
+                    print(
+                        f"[SEG] encoder {encoder_name!r} indisponível; usando fallback {encoder_fallback!r}."
+                    )
+                    encoder_name = str(encoder_fallback)
+                else:
+                    print(f"[SEG] encoder {encoder_name!r} não listado em SMP; tentando mesmo assim.")
     
             try:
                 seg_model = build_seg_model(arch, encoder_name, encoder_weights).to(DEVICE)
@@ -640,6 +701,14 @@ if RUN_TRAIN_SEG:
     
             seg_criterion = BCETverskyLoss(alpha=0.7, beta=0.3, tversky_weight=1.0)
             seg_optimizer = torch.optim.AdamW(seg_model.parameters(), lr=SEG_LR, weight_decay=SEG_WEIGHT_DECAY)
+            seg_scheduler = None
+            if SEG_USE_SCHEDULER:
+                seg_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+                    seg_optimizer,
+                    mode="min",
+                    patience=int(SEG_LR_SCHED_PATIENCE),
+                    factor=float(SEG_LR_SCHED_FACTOR),
+                )
     
             seg_save_dir = output_root() / "outputs" / "models_seg" / model_id / f"fold_{int(FOLD)}"
             seg_save_dir.mkdir(parents=True, exist_ok=True)
@@ -650,6 +719,8 @@ if RUN_TRAIN_SEG:
             for epoch in range(1, int(SEG_EPOCHS) + 1):
                 tr = train_one_epoch(seg_model, dl_seg_train, seg_criterion, seg_optimizer, DEVICE, use_amp=use_amp, progress=True, desc=f"seg train ({model_id})")
                 val_stats, val_dice = validate(seg_model, dl_seg_val, seg_criterion, DEVICE, progress=True, desc=f"seg val ({model_id})")
+                if seg_scheduler is not None:
+                    seg_scheduler.step(float(val_stats.loss))
                 print(f"[SEG {model_id}] epoch {epoch:02d}/{SEG_EPOCHS} | train_loss={tr.loss:.4f} | val_loss={val_stats.loss:.4f} | dice@0.5={val_dice:.4f}")
                 if float(val_dice) > best_dice:
                     best_dice = float(val_dice)
@@ -742,7 +813,8 @@ print("#test images:", len(test_images))
 # A métrica oficial usa JSON para a lista de pares [start, length, ...]
 # e suporta múltiplas instâncias separadas por ';'.
 def _rle_encode_single(mask: np.ndarray, fg_val: int = 1) -> list[int]:
-    dots = np.where(mask.flatten(order="C") == fg_val)[0]  # row-major (C)
+    # Kaggle oficial usa ordem coluna-major (Fortran).
+    dots = np.where(mask.flatten(order="F") == fg_val)[0]
     run_lengths: list[int] = []
     prev = -2
     for b in dots:
@@ -790,7 +862,7 @@ def rle_decode(annotation: str, shape: tuple[int, int]) -> list[np.ndarray]:
             start_index = int(start) - 1  # 1-based -> 0-based
             end_index = start_index + int(length)
             mask[start_index:end_index] = 1
-        masks.append(mask.reshape(shape, order="C"))
+        masks.append(mask.reshape(shape, order="F"))
     return masks
 
 # %%
@@ -843,7 +915,7 @@ if USE_MODEL_SUBMISSION:
 
 # %%
 # Fase 4 — Célula 12: Salvar submission.csv (roteiro oficial)
-RUN_SUBMISSION_SIMPLE = _env_bool("FORGERYSEG_RUN_SUBMISSION_SIMPLE", default=is_kaggle())
+RUN_SUBMISSION_SIMPLE = _env_bool("FORGERYSEG_RUN_SUBMISSION_SIMPLE", default=False)
 print("RUN_SUBMISSION_SIMPLE:", RUN_SUBMISSION_SIMPLE)
 
 if RUN_SUBMISSION_SIMPLE:
@@ -856,13 +928,13 @@ if RUN_SUBMISSION_SIMPLE:
 # ## Fase 4b — Submissão via `submit_ensemble.py` (opcional)
 #
 # - Usa os checkpoints em `outputs/models_seg/...`.
-# - Desabilita o gate de classificação (`--cls-skip-threshold 0.0`) para evitar falso-negativos anularem a segmentação.
+# - Respeita o `configs/infer_ensemble.json` (inclui gate do classificador e pesos do ensemble).
 #
 # Para desligar/ligar: `FORGERYSEG_RUN_SUBMISSION_SCRIPT=0|1`.
 
 # %%
 # Fase 4b — Célula 13: Gerar submission.csv via script (opcional)
-RUN_SUBMISSION_SCRIPT = _env_bool("FORGERYSEG_RUN_SUBMISSION_SCRIPT", default=False)
+RUN_SUBMISSION_SCRIPT = _env_bool("FORGERYSEG_RUN_SUBMISSION_SCRIPT", default=bool(is_kaggle()))
 print("RUN_SUBMISSION_SCRIPT:", RUN_SUBMISSION_SCRIPT)
 
 
@@ -917,32 +989,35 @@ def _find_infer_cfg_path() -> Path | None:
 
 
 if RUN_SUBMISSION_SCRIPT:
-    submit_script = _find_submit_ensemble_script()
-    infer_cfg_path = _find_infer_cfg_path()
+    try:
+        submit_script = _find_submit_ensemble_script()
+        infer_cfg_path = _find_infer_cfg_path()
 
-    submission_path = output_root() / "submission.csv"
-    local_models_dir = output_root() / "outputs" / "models_seg"
+        submission_path = output_root() / "submission.csv"
+        local_models_dir = output_root() / "outputs" / "models_seg"
 
-    cmd = [
-        sys.executable,
-        str(submit_script),
-        "--data-root",
-        str(DATA_ROOT),
-        "--out-csv",
-        str(submission_path),
-        "--cls-skip-threshold",
-        "0.0",  # desabilita o gate de classificação (evita falso-negativo anular a segmentação)
-    ]
-    if any(local_models_dir.glob("*/*/best.pt")):
-        cmd += ["--models-dir", str(local_models_dir)]
-    if infer_cfg_path is not None:
-        cmd += ["--config", str(infer_cfg_path)]
+        cmd = [
+            sys.executable,
+            str(submit_script),
+            "--data-root",
+            str(DATA_ROOT),
+            "--out-csv",
+            str(submission_path),
+        ]
+        if any(local_models_dir.glob("*/*/best.pt")):
+            cmd += ["--models-dir", str(local_models_dir)]
+        if infer_cfg_path is not None:
+            cmd += ["--config", str(infer_cfg_path)]
 
-    print("[SUBMISSION] script:", submit_script)
-    if infer_cfg_path is not None:
-        print("[SUBMISSION] cfg:", infer_cfg_path)
-    print("[SUBMISSION] running:", " ".join(cmd))
-    subprocess.check_call(cmd)
-    print("[SUBMISSION] wrote:", submission_path)
+        print("[SUBMISSION] script:", submit_script)
+        if infer_cfg_path is not None:
+            print("[SUBMISSION] cfg:", infer_cfg_path)
+        print("[SUBMISSION] running:", " ".join(cmd))
+        subprocess.check_call(cmd)
+        print("[SUBMISSION] wrote:", submission_path)
+    except Exception:
+        print("[SUBMISSION] erro ao rodar submit_ensemble.py; fallback para baseline 'authentic'.")
+        traceback.print_exc()
+        RUN_SUBMISSION_SIMPLE = True
 else:
     print("[SUBMISSION] RUN_SUBMISSION_SCRIPT=False (pulando).")

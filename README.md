@@ -231,6 +231,7 @@ unzip -q data/recodai-luc-scientific-image-forgery-detection.zip -d data/recodai
 
 ## Dicas práticas (baseline e armadilhas comuns)
 
+- **Baseline público (Kaggle):** *Public Score* **0.303** (submission “Scientific Image Forgery Detection - Version 3”, 28/dez/2025), gerada do notebook `notebooks/fase_00_pipeline_unico_kaggle.ipynb`. Snapshot congelado em `notebooks/baseline_public_0_303.ipynb`.
 - **Instâncias importam:** as máscaras são `(N, H, W)`. Se seu modelo produzir uma única máscara (segmentação sem instâncias), considere separar em instâncias via componentes conexos (*connected components*) antes de codificar em RLE.
 - **RLE “na marra” dá ruim:** use as funções oficiais do notebook `metric/recodai-f1` para evitar erro de ordem (*F-order*) e validações (starts em ordem crescente, etc.).
 - **Aspas no CSV:** `annotation` com RLE costuma precisar de aspas no CSV.

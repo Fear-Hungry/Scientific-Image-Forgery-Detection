@@ -32,6 +32,16 @@ def is_kaggle() -> bool:
     return bool(os.environ.get("KAGGLE_URL_BASE")) or Path("/kaggle").exists()
 
 
+DEFAULT_TTA = ("none", "hflip", "vflip")
+DEFAULT_CLS_SKIP_THRESHOLD = 0.30
+# Peso padrão inspirado no PDF (U-Net++ + DeepLabV3+ + SegFormer).
+DEFAULT_MODEL_WEIGHTS = {
+    "unetpp_effnet_b7": 0.4,
+    "deeplabv3p_tu_resnest101e": 0.4,
+    "segformer_mit_b3": 0.2,
+}
+
+
 @dataclass(frozen=True)
 class SegEntry:
     model_id: str
@@ -245,7 +255,7 @@ def main() -> None:
     parser.add_argument("--config", default="", help="Optional JSON config (overrides defaults)")
     parser.add_argument("--model-ids", default="", help="Comma-separated model_id filter (default: all)")
     parser.add_argument("--top-k-per-model", type=int, default=0, help="Keep top-K checkpoints per model_id by score")
-    parser.add_argument("--tta", default="none,hflip", help="Comma-separated TTA modes")
+    parser.add_argument("--tta", default=",".join(DEFAULT_TTA), help="Comma-separated TTA modes")
     parser.add_argument("--tile-size", type=int, default=1024, help="Tile size")
     parser.add_argument("--overlap", type=int, default=128, help="Tile overlap")
     parser.add_argument("--max-size", type=int, default=0, help="Optional resize long side")
@@ -258,7 +268,7 @@ def main() -> None:
     parser.add_argument(
         "--cls-skip-threshold",
         type=float,
-        default=0.0,
+        default=DEFAULT_CLS_SKIP_THRESHOLD,
         help="Skip seg when p_forged < this (<=0 disables the gate)",
     )
     parser.add_argument("--device", default="", help="Device override")
@@ -296,19 +306,24 @@ def main() -> None:
     model_ids = _parse_csv_list(cfg.get("model_ids", args.model_ids))
 
     model_weights: dict[str, float] = {}
+    weights_from_config = False
     cfg_models = cfg.get("models", [])
-    for m in cfg_models:
-        try:
-            model_weights[str(m.get("model_id"))] = float(m.get("weight", 1.0))
-        except Exception:
-            continue
+    if cfg_models:
+        weights_from_config = True
+        for m in cfg_models:
+            try:
+                model_weights[str(m.get("model_id"))] = float(m.get("weight", 1.0))
+            except Exception:
+                continue
+    else:
+        model_weights = dict(DEFAULT_MODEL_WEIGHTS)
 
     if isinstance(cfg.get("tta_modes"), (list, tuple)):
         tta_modes = tuple(str(x) for x in cfg.get("tta_modes") if str(x).strip())
     else:
         tta_modes = tuple(_parse_csv_list(cfg.get("tta", args.tta)))
 
-    if not model_ids and model_weights:
+    if not model_ids and model_weights and weights_from_config:
         model_ids = sorted(model_weights.keys())
     tile_size = int(cfg.get("tile_size", args.tile_size))
     overlap = int(cfg.get("overlap", args.overlap))

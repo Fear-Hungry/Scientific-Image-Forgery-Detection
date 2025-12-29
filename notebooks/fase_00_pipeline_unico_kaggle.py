@@ -915,13 +915,22 @@ if USE_MODEL_SUBMISSION:
 
 # %%
 # Fase 4 — Célula 12: Salvar submission.csv (roteiro oficial)
+def output_root() -> Path:
+    return Path("/kaggle/working") if is_kaggle() else Path(".").resolve()
+
+
+def _write_submission_csv(submissions_to_save: pd.DataFrame) -> Path:
+    submission_path = output_root() / "submission.csv"
+    pd.DataFrame(submissions_to_save).to_csv(submission_path, index=False)
+    return submission_path
+
+
 RUN_SUBMISSION_SIMPLE = _env_bool("FORGERYSEG_RUN_SUBMISSION_SIMPLE", default=False)
 print("RUN_SUBMISSION_SIMPLE:", RUN_SUBMISSION_SIMPLE)
 
 if RUN_SUBMISSION_SIMPLE:
     submissions_to_save = submissions_from_model if USE_MODEL_SUBMISSION else submissions
-    submission_path = "/kaggle/working/submission.csv" if is_kaggle() else "submission.csv"
-    pd.DataFrame(submissions_to_save).to_csv(submission_path, index=False)
+    submission_path = _write_submission_csv(submissions_to_save)
     print("Wrote:", submission_path)
 
 # %% [markdown]
@@ -936,10 +945,6 @@ if RUN_SUBMISSION_SIMPLE:
 # Fase 4b — Célula 13: Gerar submission.csv via script (opcional)
 RUN_SUBMISSION_SCRIPT = _env_bool("FORGERYSEG_RUN_SUBMISSION_SCRIPT", default=bool(is_kaggle()))
 print("RUN_SUBMISSION_SCRIPT:", RUN_SUBMISSION_SCRIPT)
-
-
-def output_root() -> Path:
-    return Path("/kaggle/working") if is_kaggle() else Path(".").resolve()
 
 
 def _find_submit_ensemble_script() -> Path:
@@ -988,13 +993,34 @@ def _find_infer_cfg_path() -> Path | None:
     return None
 
 
+def _find_models_dir_with_ckpt() -> Path | None:
+    candidates: list[Path] = []
+    if PROJECT_ROOT is not None:
+        candidates.append(PROJECT_ROOT / "outputs" / "models_seg")
+    candidates.append(Path("outputs/models_seg").resolve())
+
+    if is_kaggle():
+        ki = Path("/kaggle/input")
+        if ki.exists():
+            for ds in sorted(ki.glob("*")):
+                for base in (ds, ds / "recodai_bundle"):
+                    cand = base / "outputs" / "models_seg"
+                    if cand.exists():
+                        candidates.append(cand)
+
+    for cand in candidates:
+        if any(cand.glob("*/*/best.pt")):
+            return cand
+    return None
+
+
 if RUN_SUBMISSION_SCRIPT:
     try:
         submit_script = _find_submit_ensemble_script()
         infer_cfg_path = _find_infer_cfg_path()
 
         submission_path = output_root() / "submission.csv"
-        local_models_dir = output_root() / "outputs" / "models_seg"
+        models_dir = _find_models_dir_with_ckpt()
 
         cmd = [
             sys.executable,
@@ -1004,20 +1030,25 @@ if RUN_SUBMISSION_SCRIPT:
             "--out-csv",
             str(submission_path),
         ]
-        if any(local_models_dir.glob("*/*/best.pt")):
-            cmd += ["--models-dir", str(local_models_dir)]
-        if infer_cfg_path is not None:
-            cmd += ["--config", str(infer_cfg_path)]
+        if models_dir is not None:
+            cmd += ["--models-dir", str(models_dir)]
+            if infer_cfg_path is not None:
+                cmd += ["--config", str(infer_cfg_path)]
 
-        print("[SUBMISSION] script:", submit_script)
-        if infer_cfg_path is not None:
-            print("[SUBMISSION] cfg:", infer_cfg_path)
-        print("[SUBMISSION] running:", " ".join(cmd))
-        subprocess.check_call(cmd)
-        print("[SUBMISSION] wrote:", submission_path)
+            print("[SUBMISSION] script:", submit_script)
+            if infer_cfg_path is not None:
+                print("[SUBMISSION] cfg:", infer_cfg_path)
+            print("[SUBMISSION] running:", " ".join(cmd))
+            subprocess.check_call(cmd)
+            print("[SUBMISSION] wrote:", submission_path)
+        else:
+            print("[SUBMISSION] nenhum checkpoint encontrado; pulando submit_ensemble.py.")
+            RUN_SUBMISSION_SIMPLE = True
     except Exception:
         print("[SUBMISSION] erro ao rodar submit_ensemble.py; fallback para baseline 'authentic'.")
         traceback.print_exc()
+        submission_path = _write_submission_csv(submissions)
+        print("[SUBMISSION] wrote fallback:", submission_path)
         RUN_SUBMISSION_SIMPLE = True
 else:
     print("[SUBMISSION] RUN_SUBMISSION_SCRIPT=False (pulando).")

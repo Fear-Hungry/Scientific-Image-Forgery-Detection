@@ -824,6 +824,84 @@ if DINO_ONLY:
         print("[ERRO] OpenCV (cv2) não disponível. Instale ou inclua no bundle.")
         raise
 
+    def _parse_version_tuple(ver: str) -> tuple[int, ...]:
+        parts = []
+        for chunk in str(ver).replace("+", ".").split("."):
+            try:
+                parts.append(int(chunk))
+            except Exception:
+                break
+        return tuple(parts)
+
+    def _ensure_hf_hub_compat() -> None:
+        try:
+            from importlib import metadata as importlib_metadata
+        except Exception:
+            import importlib_metadata  # type: ignore
+
+        try:
+            hub_ver = importlib_metadata.version("huggingface-hub")
+        except Exception:
+            hub_ver = None
+
+        def _is_ok(v: str | None) -> bool:
+            if not v:
+                return False
+            vt = _parse_version_tuple(v)
+            return vt >= (0, 34, 0) and vt < (1, 0, 0)
+
+        if _is_ok(hub_ver):
+            return
+
+        print(f"[DINO] huggingface-hub incompatível (versão atual={hub_ver}). Tentando instalar wheel offline (<1.0).")
+        if OFFLINE_BUNDLE is None:
+            raise RuntimeError("[DINO] bundle offline não encontrado; adicione wheels de huggingface-hub 0.34.x.")
+
+        wheel_dir = OFFLINE_BUNDLE / "wheels"
+        if not wheel_dir.exists():
+            raise RuntimeError(f"[DINO] diretório de wheels não encontrado: {wheel_dir}")
+
+        hub_wheels = sorted(wheel_dir.glob("huggingface_hub-*.whl"))
+        if not hub_wheels:
+            raise RuntimeError("[DINO] wheel de huggingface-hub não encontrada. Inclua huggingface-hub==0.34.* no bundle.")
+
+        # escolher a wheel mais alta <1.0
+        def _wheel_version(p: Path) -> tuple[int, ...]:
+            name = p.name.replace("huggingface_hub-", "")
+            ver = name.split("-")[0]
+            return _parse_version_tuple(ver)
+
+        candidates = [(p, _wheel_version(p)) for p in hub_wheels]
+        candidates = [c for c in candidates if c[1] >= (0, 34, 0) and c[1] < (1, 0, 0)]
+        if not candidates:
+            raise RuntimeError("[DINO] nenhuma wheel compatível de huggingface-hub (<1.0) encontrada no bundle.")
+
+        candidates.sort(key=lambda x: x[1], reverse=True)
+        wheel_path = candidates[0][0]
+        cmd = [
+            sys.executable,
+            "-m",
+            "pip",
+            "install",
+            "--no-index",
+            "--find-links",
+            str(wheel_dir),
+            "--no-deps",
+            str(wheel_path),
+        ]
+        print("[DINO] instalando:", " ".join(cmd))
+        subprocess.check_call(cmd)
+
+        try:
+            hub_ver = importlib_metadata.version("huggingface-hub")
+        except Exception:
+            hub_ver = None
+        if not _is_ok(hub_ver):
+            raise RuntimeError(f"[DINO] huggingface-hub ainda incompatível após instalação (versão={hub_ver}).")
+        print("[DINO] huggingface-hub OK:", hub_ver)
+
+    _ensure_hf_hub_compat()
+
     try:
         from transformers import AutoImageProcessor, AutoModel
     except Exception:

@@ -350,12 +350,18 @@ print("FAST_TRAIN:", FAST_TRAIN)
 print("HAS_SEG_CKPT:", HAS_SEG_CKPT)
 print("HAS_CLS_CKPT:", HAS_CLS_CKPT)
 
-# Em notebook de submissão Kaggle, por padrão TREINAMOS.
-RUN_TRAIN_CLS = _env_bool("FORGERYSEG_RUN_TRAIN_CLS", default=True)
-RUN_TRAIN_SEG = _env_bool("FORGERYSEG_RUN_TRAIN_SEG", default=True)
+# DINO-only: pipeline simples e 100% offline (sem timm / sem downloads).
+DINO_ONLY = _env_bool("FORGERYSEG_DINO_ONLY", default=bool(is_kaggle()))
 
+# Em notebook de submissão Kaggle, por padrão TREINAMOS.
+RUN_TRAIN_CLS = _env_bool("FORGERYSEG_RUN_TRAIN_CLS", default=not DINO_ONLY)
+RUN_TRAIN_SEG = _env_bool("FORGERYSEG_RUN_TRAIN_SEG", default=not DINO_ONLY)
+RUN_TRAIN_DINO = _env_bool("FORGERYSEG_RUN_TRAIN_DINO", default=bool(DINO_ONLY))
+
+print("DINO_ONLY:", DINO_ONLY)
 print("RUN_TRAIN_CLS:", RUN_TRAIN_CLS)
 print("RUN_TRAIN_SEG:", RUN_TRAIN_SEG)
+print("RUN_TRAIN_DINO:", RUN_TRAIN_DINO)
 print("N_FOLDS:", N_FOLDS)
 print("FOLD:", FOLD)
 
@@ -453,7 +459,7 @@ class ClsDataset(Dataset):
         return x, y
 
 
-if RUN_TRAIN_CLS:
+if RUN_TRAIN_CLS and not DINO_ONLY:
     ds_cls_train = ClsDataset([train_samples[i] for i in train_idx.tolist()], build_transform(train=True))
     ds_cls_val = ClsDataset([train_samples[i] for i in val_idx.tolist()], build_transform(train=False))
 
@@ -585,7 +591,10 @@ if RUN_TRAIN_CLS:
 
     print("[CLS] done. best score:", best_score)
 else:
-    print("[CLS] RUN_TRAIN_CLS=False (pulando).")
+    if DINO_ONLY:
+        print("[CLS] DINO_ONLY=True (pulando treino do classificador).")
+    else:
+        print("[CLS] RUN_TRAIN_CLS=False (pulando).")
 
 # %%
 # Fase 3 — Célula 7: Treino de segmentação (opcional)
@@ -654,7 +663,7 @@ if FAST_TRAIN:
             {"model_id": "unet_tu_convnext_small", "arch": "unet", "encoder_name": "tu-convnext_small"},
         ]
 
-if RUN_TRAIN_SEG:
+if RUN_TRAIN_SEG and not DINO_ONLY:
     train_aug = get_train_augment(patch_size=SEG_PATCH_SIZE, copy_move_prob=SEG_COPY_MOVE_PROB)
     val_aug = get_val_augment()
 
@@ -792,7 +801,292 @@ if RUN_TRAIN_SEG:
 
         print(f"[SEG {model_id}] done. best dice:", best_dice)
 else:
-    print("[SEG] RUN_TRAIN_SEG=False (pulando).")
+    if DINO_ONLY:
+        print("[SEG] DINO_ONLY=True (pulando treino SMP/SegFormer).")
+    else:
+        print("[SEG] RUN_TRAIN_SEG=False (pulando).")
+
+# %% [markdown]
+# ## Fase 3b — DINOv2 (offline) + head leve + TTA + pós-processamento
+#
+# Pipeline simples e robusto para Kaggle offline:
+# - Encoder DINOv2 (congelado, pesos locais)
+# - Head conv leve (3 camadas)
+# - TTA + pós-processamento adaptativo
+#
+# Para ativar: `FORGERYSEG_DINO_ONLY=1` (default no Kaggle).
+
+# %%
+if DINO_ONLY:
+    try:
+        import cv2
+    except Exception:
+        print("[ERRO] OpenCV (cv2) não disponível. Instale ou inclua no bundle.")
+        raise
+
+    try:
+        from transformers import AutoImageProcessor, AutoModel
+    except Exception:
+        print("[ERRO] transformers não disponível. Inclua no bundle offline.")
+        raise
+
+    DINO_PATH = os.environ.get("FORGERYSEG_DINO_PATH", "/kaggle/input/dinov2/pytorch/base/1")
+    DINO_IMAGE_SIZE = int(os.environ.get("FORGERYSEG_DINO_IMAGE_SIZE", "512"))
+    DINO_BATCH_SIZE = int(os.environ.get("FORGERYSEG_DINO_BATCH_SIZE", "4"))
+    DINO_EPOCHS = int(os.environ.get("FORGERYSEG_DINO_EPOCHS", "5"))
+    DINO_LR = float(os.environ.get("FORGERYSEG_DINO_LR", "3e-4"))
+    DINO_WEIGHT_DECAY = float(os.environ.get("FORGERYSEG_DINO_WEIGHT_DECAY", "1e-2"))
+    DINO_LOCAL_FILES_ONLY = _env_bool("FORGERYSEG_DINO_LOCAL_ONLY", default=True)
+    DINO_DECODER_DROPOUT = float(os.environ.get("FORGERYSEG_DINO_DECODER_DROPOUT", "0.0"))
+    DINO_SAVE_DIR = (Path("/kaggle/working") if is_kaggle() else Path(".").resolve()) / "outputs" / "models_dino"
+    DINO_SAVE_DIR.mkdir(parents=True, exist_ok=True)
+    DINO_CKPT_PATH = DINO_SAVE_DIR / "best.pt"
+
+    # Pós-processamento (adaptativo)
+    DINO_THR_FACTOR = float(os.environ.get("FORGERYSEG_DINO_THR_FACTOR", "0.3"))
+    DINO_MIN_AREA = int(os.environ.get("FORGERYSEG_DINO_MIN_AREA", "30"))
+    DINO_MIN_AREA_PERCENT = float(os.environ.get("FORGERYSEG_DINO_MIN_AREA_PERCENT", "0.0005"))
+    DINO_MIN_CONFIDENCE = float(os.environ.get("FORGERYSEG_DINO_MIN_CONFIDENCE", "0.33"))
+    DINO_MORPH_CLOSE_K = int(os.environ.get("FORGERYSEG_DINO_CLOSE_K", "5"))
+    DINO_MORPH_OPEN_K = int(os.environ.get("FORGERYSEG_DINO_OPEN_K", "3"))
+    DINO_MORPH_ITERS = int(os.environ.get("FORGERYSEG_DINO_MORPH_ITERS", "1"))
+    DINO_USE_TTA = _env_bool("FORGERYSEG_DINO_TTA", default=True)
+
+    print("DINO_PATH:", DINO_PATH)
+    print("DINO_IMAGE_SIZE:", DINO_IMAGE_SIZE)
+    print("DINO_BATCH_SIZE:", DINO_BATCH_SIZE)
+    print("DINO_EPOCHS:", DINO_EPOCHS)
+    print("DINO_THR_FACTOR:", DINO_THR_FACTOR)
+    print("DINO_MIN_AREA:", DINO_MIN_AREA, "DINO_MIN_AREA_PERCENT:", DINO_MIN_AREA_PERCENT)
+    print("DINO_MIN_CONFIDENCE:", DINO_MIN_CONFIDENCE)
+    print("DINO_USE_TTA:", DINO_USE_TTA)
+
+    if str(DINO_PATH).startswith("/") and not Path(DINO_PATH).exists():
+        raise FileNotFoundError(f"[DINO] caminho não encontrado: {DINO_PATH}")
+
+    class DinoSeg(nn.Module):
+        def __init__(self, dino_path: str, out_ch: int = 1):
+            super().__init__()
+            self.processor = AutoImageProcessor.from_pretrained(
+                dino_path,
+                local_files_only=DINO_LOCAL_FILES_ONLY,
+            )
+            self.encoder = AutoModel.from_pretrained(
+                dino_path,
+                local_files_only=DINO_LOCAL_FILES_ONLY,
+            )
+            for p in self.encoder.parameters():
+                p.requires_grad = False
+
+            hidden_size = int(getattr(self.encoder.config, "hidden_size", 768))
+            self.head = nn.Sequential(
+                nn.Conv2d(hidden_size, 256, 3, padding=1),
+                nn.ReLU(inplace=True),
+                nn.Dropout2d(p=float(DINO_DECODER_DROPOUT)),
+                nn.Conv2d(256, 64, 3, padding=1),
+                nn.ReLU(inplace=True),
+                nn.Conv2d(64, out_ch, 1),
+            )
+
+        @torch.no_grad()
+        def forward_features(self, x: torch.Tensor) -> torch.Tensor:
+            # x: [B, C, H, W] float32 em [0,1]
+            imgs = (x * 255.0).clamp(0, 255).to(torch.uint8)
+            imgs = imgs.permute(0, 2, 3, 1).cpu().numpy()
+            inputs = self.processor(
+                images=list(imgs),
+                return_tensors="pt",
+                do_resize=False,
+                do_center_crop=False,
+            ).to(x.device)
+            feats = self.encoder(**inputs).last_hidden_state  # B, N, C
+            feats = feats[:, 1:, :]
+            b, n, c = feats.shape
+            s = int(np.sqrt(n))
+            fmap = feats.permute(0, 2, 1).reshape(b, c, s, s)
+            return fmap
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            fmap = self.forward_features(x)
+            logits = self.head(
+                torch.nn.functional.interpolate(
+                    fmap,
+                    size=(x.shape[2], x.shape[3]),
+                    mode="bilinear",
+                    align_corners=False,
+                )
+            )
+            return logits
+
+    def _load_union_mask(mask_path: Path | None, out_size: int) -> np.ndarray:
+        if mask_path is None:
+            return np.zeros((out_size, out_size), dtype=np.uint8)
+        masks = np.load(mask_path)
+        if masks.ndim == 2:
+            union = masks
+        else:
+            union = masks.max(axis=0)
+        union = (union > 0).astype(np.uint8)
+        if union.shape != (out_size, out_size):
+            union = cv2.resize(union, (out_size, out_size), interpolation=cv2.INTER_NEAREST)
+        return union
+
+    class DinoSegDataset(Dataset):
+        def __init__(self, samples, image_size: int, train: bool):
+            self.samples = samples
+            self.image_size = int(image_size)
+            self.train = bool(train)
+
+        def __len__(self) -> int:
+            return len(self.samples)
+
+        def __getitem__(self, idx: int):
+            s = self.samples[int(idx)]
+            img = np.array(Image.open(s.image_path).convert("RGB"))
+            img = cv2.resize(img, (self.image_size, self.image_size), interpolation=cv2.INTER_AREA)
+            mask = _load_union_mask(s.mask_path, self.image_size)
+
+            if self.train:
+                if np.random.rand() < 0.5:
+                    img = np.ascontiguousarray(img[:, ::-1])
+                    mask = np.ascontiguousarray(mask[:, ::-1])
+                if np.random.rand() < 0.5:
+                    img = np.ascontiguousarray(img[::-1, :])
+                    mask = np.ascontiguousarray(mask[::-1, :])
+                # rotações 90°
+                if np.random.rand() < 0.25:
+                    img = np.ascontiguousarray(np.rot90(img, k=1))
+                    mask = np.ascontiguousarray(np.rot90(mask, k=1))
+
+            x = torch.from_numpy(img).permute(2, 0, 1).float() / 255.0
+            y = torch.from_numpy(mask).unsqueeze(0).float()
+            return x, y
+
+    def _dice_from_logits(logits: torch.Tensor, targets: torch.Tensor, thr: float = 0.5, eps: float = 1e-6) -> float:
+        probs = torch.sigmoid(logits)
+        preds = (probs > thr).float()
+        inter = (preds * targets).sum(dim=(2, 3))
+        union = preds.sum(dim=(2, 3)) + targets.sum(dim=(2, 3))
+        dice = (2.0 * inter + eps) / (union + eps)
+        return float(dice.mean().item())
+
+    def _adaptive_threshold_value(prob: np.ndarray, factor: float = 0.3, eps: float = 1e-6) -> float:
+        mean = float(np.mean(prob))
+        std = float(np.std(prob))
+        thr = mean + float(factor) * std
+        thr = max(float(eps), min(1.0 - float(eps), thr))
+        return float(thr)
+
+    def _remove_small_components(mask: np.ndarray, min_area: int) -> np.ndarray:
+        if int(min_area) <= 0:
+            return mask
+        num, labels, stats, _ = cv2.connectedComponentsWithStats(mask.astype(np.uint8), connectivity=8)
+        if num <= 1:
+            return mask
+        out = np.zeros_like(mask, dtype=np.uint8)
+        for idx in range(1, num):
+            area = stats[idx, cv2.CC_STAT_AREA]
+            if int(area) >= int(min_area):
+                out[labels == idx] = 1
+        return out
+
+    def _postprocess_prob(prob: np.ndarray) -> np.ndarray:
+        thr = _adaptive_threshold_value(prob, factor=DINO_THR_FACTOR)
+        mask = (prob >= thr).astype(np.uint8)
+
+        if DINO_MORPH_CLOSE_K > 0:
+            kernel = np.ones((DINO_MORPH_CLOSE_K, DINO_MORPH_CLOSE_K), np.uint8)
+            mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=int(DINO_MORPH_ITERS))
+        if DINO_MORPH_OPEN_K > 0:
+            kernel = np.ones((DINO_MORPH_OPEN_K, DINO_MORPH_OPEN_K), np.uint8)
+            mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=int(DINO_MORPH_ITERS))
+
+        min_area = int(DINO_MIN_AREA)
+        if float(DINO_MIN_AREA_PERCENT) > 0:
+            min_area = max(min_area, int(float(DINO_MIN_AREA_PERCENT) * float(mask.size)))
+        mask = _remove_small_components(mask, min_area=min_area)
+
+        if int(mask.sum()) <= 0:
+            return mask
+
+        if float(DINO_MIN_CONFIDENCE) > 0:
+            conf = float(prob[mask > 0].mean())
+            if conf < float(DINO_MIN_CONFIDENCE):
+                return np.zeros_like(mask, dtype=np.uint8)
+        return mask
+
+    dino_model: DinoSeg | None = None
+    if RUN_TRAIN_DINO:
+        ds_dino_train = DinoSegDataset([train_samples[i] for i in train_idx.tolist()], DINO_IMAGE_SIZE, train=True)
+        ds_dino_val = DinoSegDataset([train_samples[i] for i in val_idx.tolist()], DINO_IMAGE_SIZE, train=False)
+        dl_dino_train = DataLoader(ds_dino_train, batch_size=DINO_BATCH_SIZE, shuffle=True, num_workers=NUM_WORKERS, pin_memory=(DEVICE == "cuda"), drop_last=True)
+        dl_dino_val = DataLoader(ds_dino_val, batch_size=DINO_BATCH_SIZE, shuffle=False, num_workers=NUM_WORKERS, pin_memory=(DEVICE == "cuda"), drop_last=False)
+
+        dino_model = DinoSeg(DINO_PATH).to(DEVICE)
+        dino_optimizer = torch.optim.AdamW(dino_model.head.parameters(), lr=DINO_LR, weight_decay=DINO_WEIGHT_DECAY)
+        dino_loss = nn.BCEWithLogitsLoss()
+        dino_scaler = torch.cuda.amp.GradScaler(enabled=(DEVICE == "cuda"))
+
+        best_dice = -1.0
+        best_epoch = 0
+        for epoch in range(1, int(DINO_EPOCHS) + 1):
+            dino_model.train()
+            tr_losses = []
+            for xb, yb in tqdm(dl_dino_train, desc="dino train", leave=False):
+                xb = xb.to(DEVICE, non_blocking=True)
+                yb = yb.to(DEVICE, non_blocking=True)
+                dino_optimizer.zero_grad(set_to_none=True)
+                with torch.cuda.amp.autocast(enabled=(DEVICE == "cuda")):
+                    logits = dino_model(xb)
+                    loss = dino_loss(logits, yb)
+                dino_scaler.scale(loss).backward()
+                dino_scaler.step(dino_optimizer)
+                dino_scaler.update()
+                tr_losses.append(float(loss.item()))
+
+            dino_model.eval()
+            val_dices = []
+            with torch.no_grad():
+                for xb, yb in tqdm(dl_dino_val, desc="dino val", leave=False):
+                    xb = xb.to(DEVICE, non_blocking=True)
+                    yb = yb.to(DEVICE, non_blocking=True)
+                    logits = dino_model(xb)
+                    val_dices.append(_dice_from_logits(logits, yb))
+            mean_dice = float(np.mean(val_dices)) if val_dices else float("nan")
+            print(f"[DINO] epoch {epoch:02d}/{DINO_EPOCHS} | train_loss={np.mean(tr_losses):.4f} | dice@0.5={mean_dice:.4f}")
+            if float(mean_dice) > best_dice:
+                best_dice = float(mean_dice)
+                best_epoch = int(epoch)
+                ckpt = {
+                    "head_state": dino_model.head.state_dict(),
+                    "config": {
+                        "dino_path": str(DINO_PATH),
+                        "image_size": int(DINO_IMAGE_SIZE),
+                        "thr_factor": float(DINO_THR_FACTOR),
+                        "min_area": int(DINO_MIN_AREA),
+                        "min_area_percent": float(DINO_MIN_AREA_PERCENT),
+                        "min_confidence": float(DINO_MIN_CONFIDENCE),
+                    },
+                    "score": float(best_dice),
+                }
+                torch.save(ckpt, DINO_CKPT_PATH)
+                print("[DINO] saved best ->", DINO_CKPT_PATH)
+            if best_epoch and (int(epoch) - int(best_epoch) >= 3):
+                print("[DINO] early stopping: sem melhora por 3 épocas.")
+                break
+
+        print("[DINO] done. best dice:", best_dice)
+    else:
+        print("[DINO] RUN_TRAIN_DINO=False (pulando treino).")
+
+    if dino_model is None:
+        if not DINO_CKPT_PATH.exists():
+            raise FileNotFoundError(f"[DINO] checkpoint não encontrado: {DINO_CKPT_PATH}")
+        dino_model = DinoSeg(DINO_PATH).to(DEVICE)
+        ckpt = torch.load(DINO_CKPT_PATH, map_location=DEVICE)
+        dino_model.head.load_state_dict(ckpt["head_state"])
+        dino_model.eval()
+        print("[DINO] carregado checkpoint ->", DINO_CKPT_PATH)
 
 # %% [markdown]
 # ## Fase 4 — Geração de `submission.csv` (roteiro oficial)
@@ -1013,6 +1307,90 @@ if USE_MODEL_SUBMISSION:
     submissions_from_model.head()
 
 # %%
+# Fase 4 — Célula 11b: Submissão DINO-only (offline)
+submissions_from_dino = None
+if DINO_ONLY:
+    if dino_model is None:
+        raise RuntimeError("[DINO] modelo não carregado.")
+
+    dino_model.eval()
+
+    TTA_MODES = ("none", "hflip", "vflip", "rot90", "rot180", "rot270")
+
+    def _apply_tta(img: np.ndarray, mode: str) -> np.ndarray:
+        if mode == "none":
+            return img
+        if mode == "hflip":
+            return np.ascontiguousarray(img[:, ::-1])
+        if mode == "vflip":
+            return np.ascontiguousarray(img[::-1, :])
+        if mode == "rot90":
+            return np.ascontiguousarray(np.rot90(img, k=1))
+        if mode == "rot180":
+            return np.ascontiguousarray(np.rot90(img, k=2))
+        if mode == "rot270":
+            return np.ascontiguousarray(np.rot90(img, k=3))
+        raise ValueError(f"TTA mode inválido: {mode}")
+
+    def _undo_tta(mask: np.ndarray, mode: str) -> np.ndarray:
+        if mode == "none":
+            return mask
+        if mode == "hflip":
+            return np.ascontiguousarray(mask[:, ::-1])
+        if mode == "vflip":
+            return np.ascontiguousarray(mask[::-1, :])
+        if mode == "rot90":
+            return np.ascontiguousarray(np.rot90(mask, k=3))
+        if mode == "rot180":
+            return np.ascontiguousarray(np.rot90(mask, k=2))
+        if mode == "rot270":
+            return np.ascontiguousarray(np.rot90(mask, k=1))
+        raise ValueError(f"TTA mode inválido: {mode}")
+
+    @torch.no_grad()
+    def _dino_predict_prob(img_rgb: np.ndarray) -> np.ndarray:
+        orig_h, orig_w = img_rgb.shape[:2]
+        img_rs = cv2.resize(img_rgb, (DINO_IMAGE_SIZE, DINO_IMAGE_SIZE), interpolation=cv2.INTER_AREA)
+        x = torch.from_numpy(img_rs).permute(2, 0, 1).float().unsqueeze(0) / 255.0
+        x = x.to(DEVICE)
+        logits = dino_model(x)
+        prob = torch.sigmoid(logits)[0, 0].detach().cpu().numpy().astype(np.float32)
+        if prob.shape != (orig_h, orig_w):
+            prob = cv2.resize(prob, (orig_w, orig_h), interpolation=cv2.INTER_LINEAR)
+        return prob
+
+    def _dino_tta_predict(img_rgb: np.ndarray) -> np.ndarray:
+        if not DINO_USE_TTA:
+            return _dino_predict_prob(img_rgb)
+        preds = []
+        for mode in TTA_MODES:
+            img_t = _apply_tta(img_rgb, mode)
+            prob_t = _dino_predict_prob(img_t)
+            prob = _undo_tta(prob_t, mode)
+            preds.append(prob)
+        return np.mean(preds, axis=0).astype(np.float32)
+
+    annotations = []
+    for case_id in case_ids:
+        key = str(case_id)
+        if key not in test_by_id:
+            raise FileNotFoundError(f"[DINO] imagem não encontrada para case_id={case_id!r}")
+        img_path = test_by_id[key]
+        img = np.array(Image.open(img_path).convert("RGB"))
+        prob = _dino_tta_predict(img)
+        mask = _postprocess_prob(prob)
+        annotations.append(encode_submission(mask))
+
+    submissions_from_dino = pd.DataFrame(
+        {
+            "case_id": case_ids,
+            "annotation": annotations,
+        }
+    )
+
+    submissions_from_dino.head()
+
+# %%
 # Fase 4 — Célula 12: Salvar submission.csv (roteiro oficial)
 def output_root() -> Path:
     return Path("/kaggle/working") if is_kaggle() else Path(".").resolve()
@@ -1028,7 +1406,10 @@ RUN_SUBMISSION_SIMPLE = _env_bool("FORGERYSEG_RUN_SUBMISSION_SIMPLE", default=Fa
 print("RUN_SUBMISSION_SIMPLE:", RUN_SUBMISSION_SIMPLE)
 
 if RUN_SUBMISSION_SIMPLE:
-    submissions_to_save = submissions_from_model if USE_MODEL_SUBMISSION else submissions
+    if DINO_ONLY and submissions_from_dino is not None:
+        submissions_to_save = submissions_from_dino
+    else:
+        submissions_to_save = submissions_from_model if USE_MODEL_SUBMISSION else submissions
     submission_path = _write_submission_csv(submissions_to_save)
     print("Wrote:", submission_path)
 
@@ -1042,7 +1423,7 @@ if RUN_SUBMISSION_SIMPLE:
 
 # %%
 # Fase 4b — Célula 13: Gerar submission.csv via script (opcional)
-RUN_SUBMISSION_SCRIPT = _env_bool("FORGERYSEG_RUN_SUBMISSION_SCRIPT", default=bool(is_kaggle()))
+RUN_SUBMISSION_SCRIPT = _env_bool("FORGERYSEG_RUN_SUBMISSION_SCRIPT", default=bool(is_kaggle() and not DINO_ONLY))
 print("RUN_SUBMISSION_SCRIPT:", RUN_SUBMISSION_SCRIPT)
 
 

@@ -18,12 +18,24 @@
 # 2) **Treino** (classificador + segmentadores)
 # 3) **Inferência + `submission.csv`** via `scripts/submit_ensemble.py`
 #
+# ## Tabela de Conteúdo
+# - [Fase 1 — Setup offline e checagens](#fase-1)
+# - [Fase 2 — Treino do classificador](#fase-2)
+# - [Fase 3 — Treino de segmentação](#fase-3)
+# - [Fase 3b — DINOv2 (offline) + head leve + TTA + pós-processamento](#fase-3b)
+# - [Fase 4 — Geração de `submission.csv`](#fase-4)
+# - [Fase 4b — Submissão via `submit_ensemble.py`](#fase-4b)
+#
 # ## Regras / Decisões
 # - Importa código do projeto em `src/forgeryseg/` (modularizado).
 # - Compatível com Kaggle **internet OFF** (instala wheels locais se existirem).
 # - Não esconde erros: exceções e tracebacks aparecem.
 #
 # ---
+
+# %% [markdown]
+# <a id="fase-1"></a>
+# ## Fase 1 — Setup offline e checagens
 
 # %%
 # Fase 1 — Célula 1: Sanidade Kaggle (lembrete)
@@ -365,6 +377,10 @@ print("RUN_TRAIN_DINO:", RUN_TRAIN_DINO)
 print("N_FOLDS:", N_FOLDS)
 print("FOLD:", FOLD)
 
+# %% [markdown]
+# <a id="fase-2"></a>
+# ## Fase 2 — Treino do classificador
+
 # %%
 # Fase 2 — Célula 5: Split (folds)
 try:
@@ -596,6 +612,10 @@ else:
     else:
         print("[CLS] RUN_TRAIN_CLS=False (pulando).")
 
+# %% [markdown]
+# <a id="fase-3"></a>
+# ## Fase 3 — Treino de segmentação
+
 # %%
 # Fase 3 — Célula 7: Treino de segmentação (opcional)
 SEG_PATCH_SIZE = int(os.environ.get("FORGERYSEG_SEG_PATCH_SIZE", "512"))
@@ -807,6 +827,7 @@ else:
         print("[SEG] RUN_TRAIN_SEG=False (pulando).")
 
 # %% [markdown]
+# <a id="fase-3b"></a>
 # ## Fase 3b — DINOv2 (offline) + head leve + TTA + pós-processamento
 #
 # Pipeline simples e robusto para Kaggle offline:
@@ -1172,6 +1193,7 @@ if DINO_ONLY:
         print("[DINO] carregado checkpoint ->", DINO_CKPT_PATH)
 
 # %% [markdown]
+# <a id="fase-4"></a>
 # ## Fase 4 — Geração de `submission.csv` (roteiro oficial)
 #
 # A competição pede **segmentação** de regiões de copy-move e usa uma variante do **F1-score**,
@@ -1485,18 +1507,18 @@ def _write_submission_csv(submissions_to_save: pd.DataFrame) -> Path:
     return submission_path
 
 
-RUN_SUBMISSION_SIMPLE = _env_bool("FORGERYSEG_RUN_SUBMISSION_SIMPLE", default=False)
+RUN_SUBMISSION_SIMPLE = True  # Sempre gerar submission.csv neste notebook.
 print("RUN_SUBMISSION_SIMPLE:", RUN_SUBMISSION_SIMPLE)
 
-if RUN_SUBMISSION_SIMPLE:
-    if DINO_ONLY and submissions_from_dino is not None:
-        submissions_to_save = submissions_from_dino
-    else:
-        submissions_to_save = submissions_from_model if USE_MODEL_SUBMISSION else submissions
-    submission_path = _write_submission_csv(submissions_to_save)
-    print("Wrote:", submission_path)
+if DINO_ONLY and submissions_from_dino is not None:
+    submissions_to_save = submissions_from_dino
+else:
+    submissions_to_save = submissions_from_model if USE_MODEL_SUBMISSION else submissions
+submission_path = _write_submission_csv(submissions_to_save)
+print("Wrote:", submission_path)
 
 # %% [markdown]
+# <a id="fase-4b"></a>
 # ## Fase 4b — Submissão via `submit_ensemble.py` (opcional)
 #
 # - Usa os checkpoints em `outputs/models_seg/...`.
@@ -1506,7 +1528,7 @@ if RUN_SUBMISSION_SIMPLE:
 
 # %%
 # Fase 4b — Célula 13: Gerar submission.csv via script (opcional)
-RUN_SUBMISSION_SCRIPT = _env_bool("FORGERYSEG_RUN_SUBMISSION_SCRIPT", default=bool(is_kaggle() and not DINO_ONLY))
+RUN_SUBMISSION_SCRIPT = True  # Sempre tentar gerar via script.
 print("RUN_SUBMISSION_SCRIPT:", RUN_SUBMISSION_SCRIPT)
 
 
@@ -1588,31 +1610,33 @@ def _find_models_dir_with_ckpt() -> Path | None:
 
 
 if RUN_SUBMISSION_SCRIPT:
-    submit_script = _find_submit_ensemble_script()
-    infer_cfg_path = _find_infer_cfg_path()
-
     submission_path = output_root() / "submission.csv"
-    models_dir = _find_models_dir_with_ckpt()
-    if models_dir is None:
-        raise RuntimeError("[SUBMISSION] nenhum checkpoint encontrado em outputs/models_seg.")
+    try:
+        submit_script = _find_submit_ensemble_script()
+    except FileNotFoundError as exc:
+        print(f"[SUBMISSION] {exc}")
+        print("[SUBMISSION] script não encontrado; mantendo submission.csv atual.")
+    else:
+        infer_cfg_path = _find_infer_cfg_path()
+        models_dir = _find_models_dir_with_ckpt()
+        if models_dir is None:
+            print("[SUBMISSION] nenhum checkpoint encontrado em outputs/models_seg; mantendo submission.csv atual.")
+        else:
+            cmd = [
+                sys.executable,
+                str(submit_script),
+                "--data-root",
+                str(DATA_ROOT),
+                "--out-csv",
+                str(submission_path),
+            ]
+            cmd += ["--models-dir", str(models_dir)]
+            if infer_cfg_path is not None:
+                cmd += ["--config", str(infer_cfg_path)]
 
-    cmd = [
-        sys.executable,
-        str(submit_script),
-        "--data-root",
-        str(DATA_ROOT),
-        "--out-csv",
-        str(submission_path),
-    ]
-    cmd += ["--models-dir", str(models_dir)]
-    if infer_cfg_path is not None:
-        cmd += ["--config", str(infer_cfg_path)]
-
-    print("[SUBMISSION] script:", submit_script)
-    if infer_cfg_path is not None:
-        print("[SUBMISSION] cfg:", infer_cfg_path)
-    print("[SUBMISSION] running:", " ".join(cmd))
-    subprocess.check_call(cmd)
-    print("[SUBMISSION] wrote:", submission_path)
-else:
-    print("[SUBMISSION] RUN_SUBMISSION_SCRIPT=False (pulando).")
+            print("[SUBMISSION] script:", submit_script)
+            if infer_cfg_path is not None:
+                print("[SUBMISSION] cfg:", infer_cfg_path)
+            print("[SUBMISSION] running:", " ".join(cmd))
+            subprocess.check_call(cmd)
+            print("[SUBMISSION] wrote:", submission_path)

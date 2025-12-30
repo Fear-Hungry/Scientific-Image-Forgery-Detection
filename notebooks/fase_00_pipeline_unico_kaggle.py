@@ -1507,7 +1507,7 @@ def _write_submission_csv(submissions_to_save: pd.DataFrame) -> Path:
     return submission_path
 
 
-RUN_SUBMISSION_SIMPLE = True  # Sempre gerar submission.csv neste notebook.
+RUN_SUBMISSION_SIMPLE = True  # Sempre ativo; não desabilitar neste notebook.
 print("RUN_SUBMISSION_SIMPLE:", RUN_SUBMISSION_SIMPLE)
 
 if DINO_ONLY and submissions_from_dino is not None:
@@ -1524,11 +1524,9 @@ print("Wrote:", submission_path)
 # - Usa os checkpoints em `outputs/models_seg/...`.
 # - Respeita o `configs/infer_ensemble.json` (inclui gate do classificador e pesos do ensemble).
 #
-# Para desligar/ligar: `FORGERYSEG_RUN_SUBMISSION_SCRIPT=0|1`.
-
 # %%
 # Fase 4b — Célula 13: Gerar submission.csv via script (opcional)
-RUN_SUBMISSION_SCRIPT = True  # Sempre tentar gerar via script.
+RUN_SUBMISSION_SCRIPT = True  # Sempre ativo; não desabilitar neste notebook.
 print("RUN_SUBMISSION_SCRIPT:", RUN_SUBMISSION_SCRIPT)
 
 
@@ -1609,34 +1607,33 @@ def _find_models_dir_with_ckpt() -> Path | None:
     return None
 
 
-if RUN_SUBMISSION_SCRIPT:
-    submission_path = output_root() / "submission.csv"
-    try:
-        submit_script = _find_submit_ensemble_script()
-    except FileNotFoundError as exc:
-        print(f"[SUBMISSION] {exc}")
-        print("[SUBMISSION] script não encontrado; mantendo submission.csv atual.")
+submission_path = output_root() / "submission.csv"
+try:
+    submit_script = _find_submit_ensemble_script()
+except FileNotFoundError as exc:
+    print(f"[SUBMISSION] {exc}")
+    print("[SUBMISSION] script não encontrado; mantendo submission.csv atual.")
+else:
+    infer_cfg_path = _find_infer_cfg_path()
+    models_dir = _find_models_dir_with_ckpt()
+    if models_dir is None:
+        print("[SUBMISSION] nenhum checkpoint encontrado em outputs/models_seg; mantendo submission.csv atual.")
     else:
-        infer_cfg_path = _find_infer_cfg_path()
-        models_dir = _find_models_dir_with_ckpt()
-        if models_dir is None:
-            print("[SUBMISSION] nenhum checkpoint encontrado em outputs/models_seg; mantendo submission.csv atual.")
-        else:
-            cmd = [
-                sys.executable,
-                str(submit_script),
-                "--data-root",
-                str(DATA_ROOT),
-                "--out-csv",
-                str(submission_path),
-            ]
-            cmd += ["--models-dir", str(models_dir)]
-            if infer_cfg_path is not None:
-                cmd += ["--config", str(infer_cfg_path)]
+        cmd = [
+            sys.executable,
+            str(submit_script),
+            "--data-root",
+            str(DATA_ROOT),
+            "--out-csv",
+            str(submission_path),
+        ]
+        cmd += ["--models-dir", str(models_dir)]
+        if infer_cfg_path is not None:
+            cmd += ["--config", str(infer_cfg_path)]
 
-            print("[SUBMISSION] script:", submit_script)
-            if infer_cfg_path is not None:
-                print("[SUBMISSION] cfg:", infer_cfg_path)
-            print("[SUBMISSION] running:", " ".join(cmd))
-            subprocess.check_call(cmd)
-            print("[SUBMISSION] wrote:", submission_path)
+        print("[SUBMISSION] script:", submit_script)
+        if infer_cfg_path is not None:
+            print("[SUBMISSION] cfg:", infer_cfg_path)
+        print("[SUBMISSION] running:", " ".join(cmd))
+        subprocess.check_call(cmd)
+        print("[SUBMISSION] wrote:", submission_path)

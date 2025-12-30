@@ -39,6 +39,63 @@ def normalize_image(image: np.ndarray, mean=IMAGENET_MEAN, std=IMAGENET_STD) -> 
     return (image - mean) / std
 
 
+TTA_MODES = ("none", "hflip", "vflip", "hvflip", "rot90", "rot180", "rot270")
+
+
+def apply_tta(arr: np.ndarray, mode: str, *, axes: tuple[int, int] = (0, 1)) -> np.ndarray:
+    """
+    Apply a simple test-time augmentation to an array.
+
+    By default we assume spatial axes are (H, W) = (0, 1), which matches common HWC images and HW masks.
+    For CHW tensors, pass axes=(1, 2).
+    """
+    mode = str(mode).strip().lower()
+    if mode == "none":
+        return arr
+
+    ax0, ax1 = axes
+    if ax0 == ax1:
+        raise ValueError("axes must be two different spatial axes")
+    if arr.ndim <= max(ax0, ax1):
+        raise ValueError(f"Input array has shape {arr.shape}; cannot apply TTA on axes={axes}")
+
+    if mode == "hflip":
+        slc = [slice(None)] * arr.ndim
+        slc[ax1] = slice(None, None, -1)
+        return np.ascontiguousarray(arr[tuple(slc)])
+    if mode == "vflip":
+        slc = [slice(None)] * arr.ndim
+        slc[ax0] = slice(None, None, -1)
+        return np.ascontiguousarray(arr[tuple(slc)])
+    if mode == "hvflip":
+        slc = [slice(None)] * arr.ndim
+        slc[ax0] = slice(None, None, -1)
+        slc[ax1] = slice(None, None, -1)
+        return np.ascontiguousarray(arr[tuple(slc)])
+    if mode == "rot90":
+        return np.ascontiguousarray(np.rot90(arr, k=1, axes=axes))
+    if mode == "rot180":
+        return np.ascontiguousarray(np.rot90(arr, k=2, axes=axes))
+    if mode == "rot270":
+        return np.ascontiguousarray(np.rot90(arr, k=3, axes=axes))
+
+    raise ValueError(f"Invalid TTA mode: {mode!r}. Supported: {', '.join(TTA_MODES)}")
+
+
+def undo_tta(arr: np.ndarray, mode: str, *, axes: tuple[int, int] = (0, 1)) -> np.ndarray:
+    """Undo the augmentation applied by `apply_tta`."""
+    mode = str(mode).strip().lower()
+    if mode in {"none", "hflip", "vflip", "hvflip"}:
+        return apply_tta(arr, mode, axes=axes)
+    if mode == "rot90":
+        return apply_tta(arr, "rot270", axes=axes)
+    if mode == "rot180":
+        return apply_tta(arr, "rot180", axes=axes)
+    if mode == "rot270":
+        return apply_tta(arr, "rot90", axes=axes)
+    raise ValueError(f"Invalid TTA mode: {mode!r}. Supported: {', '.join(TTA_MODES)}")
+
+
 def _tile_coords(length: int, tile_size: int, overlap: int) -> list[tuple[int, int]]:
     stride = tile_size - overlap
     if stride <= 0:

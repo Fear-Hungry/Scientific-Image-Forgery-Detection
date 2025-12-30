@@ -7,15 +7,22 @@ from torch import nn
 from torch.nn import functional as F
 
 try:
-    from transformers import AutoConfig, AutoModel
+    from transformers import AutoConfig, AutoImageProcessor, AutoModel
 except ImportError:  # pragma: no cover - optional dependency
     AutoConfig = None
+    AutoImageProcessor = None
     AutoModel = None
 
 
 def _require_transformers() -> None:
     if AutoModel is None or AutoConfig is None:
         raise ImportError("transformers is required for DINOv2 models. Install it with `pip install transformers`.")
+
+
+def _require_image_processor() -> None:
+    _require_transformers()
+    if AutoImageProcessor is None:
+        raise ImportError("transformers AutoImageProcessor is required for DinoSeg. Install `transformers>=4.26`.")
 
 
 def _as_positive_int(value: object, *, name: str) -> int:
@@ -374,3 +381,118 @@ def build_dinov2_classifier(
         trust_remote_code=trust_remote_code,
         torch_dtype=_parse_torch_dtype(torch_dtype),
     )
+
+
+class DinoSeg(nn.Module):
+    """
+    Compatibility model for the notebook "DINO-only" path.
+
+    It wraps a frozen DINOv2 encoder loaded from `transformers` and trains only a lightweight conv head.
+    The forward expects inputs in [0, 1] (B, C, H, W) and internally uses the HF image processor
+    (no resize, no center crop) to match the encoder's preprocessing.
+    """
+
+    def __init__(
+        self,
+        dino_path: str,
+        out_ch: int = 1,
+        *,
+        decoder_dropout: float = 0.0,
+        pretrained: bool = True,
+        freeze_encoder: bool = True,
+        cache_dir: str | None = None,
+        local_files_only: bool = False,
+        revision: str | None = None,
+        trust_remote_code: bool = False,
+        torch_dtype: torch.dtype | None = None,
+    ) -> None:
+        super().__init__()
+        _require_image_processor()
+        self.dino_path = str(dino_path)
+        self.freeze_encoder = bool(freeze_encoder)
+
+        self.processor = AutoImageProcessor.from_pretrained(  # type: ignore[misc]
+            self.dino_path,
+            cache_dir=cache_dir,
+            local_files_only=bool(local_files_only),
+            revision=revision,
+            trust_remote_code=bool(trust_remote_code),
+        )
+        if pretrained:
+            self.encoder = AutoModel.from_pretrained(  # type: ignore[misc]
+                self.dino_path,
+                cache_dir=cache_dir,
+                local_files_only=bool(local_files_only),
+                revision=revision,
+                trust_remote_code=bool(trust_remote_code),
+                torch_dtype=torch_dtype,
+            )
+        else:
+            config = AutoConfig.from_pretrained(  # type: ignore[misc]
+                self.dino_path,
+                cache_dir=cache_dir,
+                local_files_only=bool(local_files_only),
+                revision=revision,
+                trust_remote_code=bool(trust_remote_code),
+            )
+            self.encoder = AutoModel.from_config(config)  # type: ignore[misc]
+
+        if self.freeze_encoder:
+            self.encoder.requires_grad_(False)
+
+        self.patch_size = _resolve_patch_size(self.encoder)
+        self.hidden_size = _resolve_hidden_size(self.encoder)
+
+        self.head = nn.Sequential(
+            nn.Conv2d(self.hidden_size, 256, 3, padding=1),
+            nn.ReLU(inplace=True),
+            nn.Dropout2d(p=float(decoder_dropout)),
+            nn.Conv2d(256, 64, 3, padding=1),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(64, int(out_ch), 1),
+        )
+
+    def train(self, mode: bool = True):
+        super().train(mode)
+        if self.freeze_encoder:
+            self.encoder.eval()
+        return self
+
+    def forward_features(self, x: torch.Tensor) -> torch.Tensor:
+        if x.ndim != 4:
+            raise ValueError(f"Expected BCHW tensor, got shape {tuple(x.shape)}")
+        if not torch.is_floating_point(x):
+            raise TypeError("DinoSeg expects a floating point tensor in [0, 1]")
+
+        imgs = (x * 255.0).clamp(0, 255).to(torch.uint8)
+        imgs = imgs.permute(0, 2, 3, 1).cpu().numpy()
+        inputs = self.processor(  # type: ignore[misc]
+            images=list(imgs),
+            return_tensors="pt",
+            do_resize=False,
+            do_center_crop=False,
+        ).to(x.device)
+
+        if self.freeze_encoder:
+            with torch.no_grad():
+                outputs = self.encoder(**inputs)
+        else:
+            outputs = self.encoder(**inputs)
+
+        tokens = outputs.last_hidden_state
+        if tokens.ndim != 3:
+            raise ValueError(f"Expected token tensor (B, N, C), got shape {tuple(tokens.shape)}")
+
+        h, w = int(inputs["pixel_values"].shape[-2]), int(inputs["pixel_values"].shape[-1])
+        grid_h = h // int(self.patch_size)
+        grid_w = w // int(self.patch_size)
+        if grid_h <= 0 or grid_w <= 0:
+            raise ValueError(f"Input too small for patch_size={self.patch_size}: got {h}x{w}")
+        expected = int(grid_h * grid_w)
+        _, patch_tokens = _split_tokens(tokens, expected)
+        return patch_tokens.transpose(1, 2).reshape(x.shape[0], self.hidden_size, grid_h, grid_w)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        fmap = self.forward_features(x)
+        fmap = F.interpolate(fmap, size=(int(x.shape[2]), int(x.shape[3])), mode="bilinear", align_corners=False)
+        return self.head(fmap)

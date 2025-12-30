@@ -18,24 +18,12 @@
 # 2) **Treino** (classificador + segmentadores)
 # 3) **Inferência + `submission.csv`** via `scripts/submit_ensemble.py`
 #
-# ## Tabela de Conteúdo
-# - [Fase 1 — Setup offline e checagens](#fase-1)
-# - [Fase 2 — Treino do classificador](#fase-2)
-# - [Fase 3 — Treino de segmentação](#fase-3)
-# - [Fase 3b — DINOv2 (offline) + head leve + TTA + pós-processamento](#fase-3b)
-# - [Fase 4 — Geração de `submission.csv`](#fase-4)
-# - [Fase 4b — Submissão via `submit_ensemble.py`](#fase-4b)
-#
 # ## Regras / Decisões
 # - Importa código do projeto em `src/forgeryseg/` (modularizado).
 # - Compatível com Kaggle **internet OFF** (instala wheels locais se existirem).
 # - Não esconde erros: exceções e tracebacks aparecem.
 #
 # ---
-
-# %% [markdown]
-# <a id="fase-1"></a>
-# ## Fase 1 — Setup offline e checagens
 
 # %%
 # Fase 1 — Célula 1: Sanidade Kaggle (lembrete)
@@ -51,6 +39,7 @@ import random
 import sys
 import traceback
 import warnings
+from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
@@ -259,7 +248,7 @@ print("PROJECT_ROOT:", PROJECT_ROOT)
 from torch.utils.data import DataLoader, Dataset  # noqa: E402
 
 from forgeryseg.augment import get_train_augment, get_val_augment  # noqa: E402
-from forgeryseg.dataset import PatchDataset, build_train_index  # noqa: E402
+from forgeryseg.dataset import DinoSegDataset, PatchDataset, build_train_index  # noqa: E402
 from forgeryseg.losses import BCETverskyLoss  # noqa: E402
 from forgeryseg.models import builders, dinov2  # noqa: E402
 from forgeryseg.models.classifier import build_classifier, compute_pos_weight  # noqa: E402
@@ -344,31 +333,71 @@ def _env_bool(name: str, default: bool) -> bool:
     return str(v).strip().lower() in {"1", "true", "yes", "y", "on"}
 
 
-ALLOW_DOWNLOAD = _env_bool("FORGERYSEG_ALLOW_DOWNLOAD", default=not is_kaggle())
+
+
+@dataclass(frozen=True)
+class Config:
+    allow_download: bool
+    offline_no_download: bool
+    n_folds: int
+    fold: int
+    fast_train: bool
+    dino_only: bool
+    run_train_cls: bool
+    run_train_seg: bool
+    run_train_dino: bool
+
+
+_allow_download = _env_bool("FORGERYSEG_ALLOW_DOWNLOAD", default=not is_kaggle())
 # No Kaggle, a internet é OFF por padrão. Permita downloads apenas se o usuário pedir explicitamente.
-OFFLINE_NO_DOWNLOAD = bool(is_kaggle() and not ALLOW_DOWNLOAD)
+_offline_no_download = bool(is_kaggle() and not _allow_download)
+
+_n_folds = int(os.environ.get("FORGERYSEG_N_FOLDS", "5"))
+_fold = int(os.environ.get("FORGERYSEG_FOLD", "0"))
+_fast_train = _env_bool("FORGERYSEG_FAST_TRAIN", default=bool(is_kaggle() and not HAS_SEG_CKPT))
+_dino_only = _env_bool("FORGERYSEG_DINO_ONLY", default=bool(is_kaggle()))
+
+# Em notebook de submissão Kaggle, por padrão TREINAMOS.
+_run_train_cls = _env_bool("FORGERYSEG_RUN_TRAIN_CLS", default=not _dino_only)
+_run_train_seg = _env_bool("FORGERYSEG_RUN_TRAIN_SEG", default=not _dino_only)
+_run_train_dino = _env_bool("FORGERYSEG_RUN_TRAIN_DINO", default=bool(_dino_only))
+
+CONFIG = Config(
+    allow_download=_allow_download,
+    offline_no_download=_offline_no_download,
+    n_folds=_n_folds,
+    fold=_fold,
+    fast_train=_fast_train,
+    dino_only=_dino_only,
+    run_train_cls=_run_train_cls,
+    run_train_seg=_run_train_seg,
+    run_train_dino=_run_train_dino,
+)
+
+ALLOW_DOWNLOAD = bool(CONFIG.allow_download)
+OFFLINE_NO_DOWNLOAD = bool(CONFIG.offline_no_download)
 if OFFLINE_NO_DOWNLOAD:
     os.environ.setdefault("HF_HUB_OFFLINE", "1")
     os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
     print("[OFFLINE] downloads disabled (Kaggle offline).")
 
 
-N_FOLDS = int(os.environ.get("FORGERYSEG_N_FOLDS", "5"))
-FOLD = int(os.environ.get("FORGERYSEG_FOLD", "0"))
+N_FOLDS = int(CONFIG.n_folds)
+FOLD = int(CONFIG.fold)
 
-FAST_TRAIN = _env_bool("FORGERYSEG_FAST_TRAIN", default=bool(is_kaggle() and not HAS_SEG_CKPT))
+FAST_TRAIN = bool(CONFIG.fast_train)
 
 print("FAST_TRAIN:", FAST_TRAIN)
 print("HAS_SEG_CKPT:", HAS_SEG_CKPT)
 print("HAS_CLS_CKPT:", HAS_CLS_CKPT)
 
 # DINO-only: pipeline simples e 100% offline (sem timm / sem downloads).
-DINO_ONLY = _env_bool("FORGERYSEG_DINO_ONLY", default=bool(is_kaggle()))
+DINO_ONLY = bool(CONFIG.dino_only)
 
 # Em notebook de submissão Kaggle, por padrão TREINAMOS.
-RUN_TRAIN_CLS = _env_bool("FORGERYSEG_RUN_TRAIN_CLS", default=not DINO_ONLY)
-RUN_TRAIN_SEG = _env_bool("FORGERYSEG_RUN_TRAIN_SEG", default=not DINO_ONLY)
-RUN_TRAIN_DINO = _env_bool("FORGERYSEG_RUN_TRAIN_DINO", default=bool(DINO_ONLY))
+RUN_TRAIN_CLS = bool(CONFIG.run_train_cls)
+RUN_TRAIN_SEG = bool(CONFIG.run_train_seg)
+RUN_TRAIN_DINO = bool(CONFIG.run_train_dino)
 
 print("DINO_ONLY:", DINO_ONLY)
 print("RUN_TRAIN_CLS:", RUN_TRAIN_CLS)
@@ -376,10 +405,6 @@ print("RUN_TRAIN_SEG:", RUN_TRAIN_SEG)
 print("RUN_TRAIN_DINO:", RUN_TRAIN_DINO)
 print("N_FOLDS:", N_FOLDS)
 print("FOLD:", FOLD)
-
-# %% [markdown]
-# <a id="fase-2"></a>
-# ## Fase 2 — Treino do classificador
 
 # %%
 # Fase 2 — Célula 5: Split (folds)
@@ -417,8 +442,7 @@ except Exception:
         return x
 
 
-IMAGENET_MEAN = (0.485, 0.456, 0.406)
-IMAGENET_STD = (0.229, 0.224, 0.225)
+from forgeryseg.classification import BinaryForgeryClsDataset, build_classification_transform
 
 CLS_MODEL_NAME = "tf_efficientnet_b4_ns"
 CLS_BACKEND = os.environ.get("FORGERYSEG_CLS_BACKEND", "timm").strip().lower()
@@ -445,39 +469,23 @@ CLS_LR_SCHED_FACTOR = float(os.environ.get("FORGERYSEG_CLS_LR_SCHED_FACTOR", "0.
 CLS_PRETRAINED = _env_bool("FORGERYSEG_CLS_PRETRAINED", default=True)
 
 
-def build_transform(train: bool) -> T.Compose:
-    aug = []
-    if train:
-        aug += [T.RandomHorizontalFlip(p=0.5), T.RandomVerticalFlip(p=0.5)]
-    aug += [
-        T.Resize((CLS_IMAGE_SIZE, CLS_IMAGE_SIZE)),
-        T.ToTensor(),
-        T.Normalize(IMAGENET_MEAN, IMAGENET_STD),
-    ]
-    return T.Compose(aug)
-
-
-class ClsDataset(Dataset):
-    def __init__(self, samples, transform: T.Compose):
-        self.samples = samples
-        self.transform = transform
-
-    def __len__(self) -> int:
-        return len(self.samples)
-
-    def __getitem__(self, idx: int):
-        s = self.samples[int(idx)]
-        from PIL import Image
-
-        img = Image.open(s.image_path).convert("RGB")
-        x = self.transform(img)
-        y = torch.tensor([0.0 if s.is_authentic else 1.0], dtype=torch.float32)
-        return x, y
+def _build_cls_transform(train: bool):
+    return build_classification_transform(
+        image_size=CLS_IMAGE_SIZE,
+        train=bool(train),
+        p_hflip=0.5,
+        p_vflip=0.5,
+        brightness=0.0,
+        contrast=0.0,
+        grayscale_prob=0.0,
+        blur_prob=0.0,
+        cutout_prob=0.0,
+    )
 
 
 if RUN_TRAIN_CLS and not DINO_ONLY:
-    ds_cls_train = ClsDataset([train_samples[i] for i in train_idx.tolist()], build_transform(train=True))
-    ds_cls_val = ClsDataset([train_samples[i] for i in val_idx.tolist()], build_transform(train=False))
+    ds_cls_train = BinaryForgeryClsDataset([train_samples[i] for i in train_idx.tolist()], _build_cls_transform(train=True))
+    ds_cls_val = BinaryForgeryClsDataset([train_samples[i] for i in val_idx.tolist()], _build_cls_transform(train=False))
 
     num_workers = NUM_WORKERS
     dl_cls_train = DataLoader(ds_cls_train, batch_size=CLS_BATCH_SIZE, shuffle=True, num_workers=num_workers, pin_memory=(DEVICE == "cuda"), drop_last=True)
@@ -611,10 +619,6 @@ else:
         print("[CLS] DINO_ONLY=True (pulando treino do classificador).")
     else:
         print("[CLS] RUN_TRAIN_CLS=False (pulando).")
-
-# %% [markdown]
-# <a id="fase-3"></a>
-# ## Fase 3 — Treino de segmentação
 
 # %%
 # Fase 3 — Célula 7: Treino de segmentação (opcional)
@@ -827,7 +831,6 @@ else:
         print("[SEG] RUN_TRAIN_SEG=False (pulando).")
 
 # %% [markdown]
-# <a id="fase-3b"></a>
 # ## Fase 3b — DINOv2 (offline) + head leve + TTA + pós-processamento
 #
 # Pipeline simples e robusto para Kaggle offline:
@@ -929,7 +932,7 @@ if DINO_ONLY:
     _ensure_hf_hub_compat()
 
     try:
-        from transformers import AutoImageProcessor, AutoModel
+        import transformers  # noqa: F401
     except Exception:
         print("[ERRO] transformers não disponível. Inclua no bundle offline.")
         raise
@@ -968,103 +971,9 @@ if DINO_ONLY:
     if str(DINO_PATH).startswith("/") and not Path(DINO_PATH).exists():
         raise FileNotFoundError(f"[DINO] caminho não encontrado: {DINO_PATH}")
 
-    class DinoSeg(nn.Module):
-        def __init__(self, dino_path: str, out_ch: int = 1):
-            super().__init__()
-            self.processor = AutoImageProcessor.from_pretrained(
-                dino_path,
-                local_files_only=DINO_LOCAL_FILES_ONLY,
-            )
-            self.encoder = AutoModel.from_pretrained(
-                dino_path,
-                local_files_only=DINO_LOCAL_FILES_ONLY,
-            )
-            for p in self.encoder.parameters():
-                p.requires_grad = False
-
-            hidden_size = int(getattr(self.encoder.config, "hidden_size", 768))
-            self.head = nn.Sequential(
-                nn.Conv2d(hidden_size, 256, 3, padding=1),
-                nn.ReLU(inplace=True),
-                nn.Dropout2d(p=float(DINO_DECODER_DROPOUT)),
-                nn.Conv2d(256, 64, 3, padding=1),
-                nn.ReLU(inplace=True),
-                nn.Conv2d(64, out_ch, 1),
-            )
-
-        @torch.no_grad()
-        def forward_features(self, x: torch.Tensor) -> torch.Tensor:
-            # x: [B, C, H, W] float32 em [0,1]
-            imgs = (x * 255.0).clamp(0, 255).to(torch.uint8)
-            imgs = imgs.permute(0, 2, 3, 1).cpu().numpy()
-            inputs = self.processor(
-                images=list(imgs),
-                return_tensors="pt",
-                do_resize=False,
-                do_center_crop=False,
-            ).to(x.device)
-            feats = self.encoder(**inputs).last_hidden_state  # B, N, C
-            feats = feats[:, 1:, :]
-            b, n, c = feats.shape
-            s = int(np.sqrt(n))
-            fmap = feats.permute(0, 2, 1).reshape(b, c, s, s)
-            return fmap
-
-        def forward(self, x: torch.Tensor) -> torch.Tensor:
-            fmap = self.forward_features(x)
-            logits = self.head(
-                torch.nn.functional.interpolate(
-                    fmap,
-                    size=(x.shape[2], x.shape[3]),
-                    mode="bilinear",
-                    align_corners=False,
-                )
-            )
-            return logits
-
-    def _load_union_mask(mask_path: Path | None, out_size: int) -> np.ndarray:
-        if mask_path is None:
-            return np.zeros((out_size, out_size), dtype=np.uint8)
-        masks = np.load(mask_path)
-        if masks.ndim == 2:
-            union = masks
-        else:
-            union = masks.max(axis=0)
-        union = (union > 0).astype(np.uint8)
-        if union.shape != (out_size, out_size):
-            union = cv2.resize(union, (out_size, out_size), interpolation=cv2.INTER_NEAREST)
-        return union
-
-    class DinoSegDataset(Dataset):
-        def __init__(self, samples, image_size: int, train: bool):
-            self.samples = samples
-            self.image_size = int(image_size)
-            self.train = bool(train)
-
-        def __len__(self) -> int:
-            return len(self.samples)
-
-        def __getitem__(self, idx: int):
-            s = self.samples[int(idx)]
-            img = np.array(Image.open(s.image_path).convert("RGB"))
-            img = cv2.resize(img, (self.image_size, self.image_size), interpolation=cv2.INTER_AREA)
-            mask = _load_union_mask(s.mask_path, self.image_size)
-
-            if self.train:
-                if np.random.rand() < 0.5:
-                    img = np.ascontiguousarray(img[:, ::-1])
-                    mask = np.ascontiguousarray(mask[:, ::-1])
-                if np.random.rand() < 0.5:
-                    img = np.ascontiguousarray(img[::-1, :])
-                    mask = np.ascontiguousarray(mask[::-1, :])
-                # rotações 90°
-                if np.random.rand() < 0.25:
-                    img = np.ascontiguousarray(np.rot90(img, k=1))
-                    mask = np.ascontiguousarray(np.rot90(mask, k=1))
-
-            x = torch.from_numpy(img).permute(2, 0, 1).float() / 255.0
-            y = torch.from_numpy(mask).unsqueeze(0).float()
-            return x, y
+    # Reutiliza implementação modularizada em `src/forgeryseg` (evita redefinição no notebook):
+    # - Modelo: `forgeryseg.models.dinov2.DinoSeg`
+    # - Dataset: `forgeryseg.dataset.DinoSegDataset`
 
     def _dice_from_logits(logits: torch.Tensor, targets: torch.Tensor, thr: float = 0.5, eps: float = 1e-6) -> float:
         probs = torch.sigmoid(logits)
@@ -1119,14 +1028,18 @@ if DINO_ONLY:
                 return np.zeros_like(mask, dtype=np.uint8)
         return mask
 
-    dino_model: DinoSeg | None = None
+    dino_model = None
     if RUN_TRAIN_DINO:
         ds_dino_train = DinoSegDataset([train_samples[i] for i in train_idx.tolist()], DINO_IMAGE_SIZE, train=True)
         ds_dino_val = DinoSegDataset([train_samples[i] for i in val_idx.tolist()], DINO_IMAGE_SIZE, train=False)
         dl_dino_train = DataLoader(ds_dino_train, batch_size=DINO_BATCH_SIZE, shuffle=True, num_workers=NUM_WORKERS, pin_memory=(DEVICE == "cuda"), drop_last=True)
         dl_dino_val = DataLoader(ds_dino_val, batch_size=DINO_BATCH_SIZE, shuffle=False, num_workers=NUM_WORKERS, pin_memory=(DEVICE == "cuda"), drop_last=False)
 
-        dino_model = DinoSeg(DINO_PATH).to(DEVICE)
+        dino_model = dinov2.DinoSeg(
+            DINO_PATH,
+            decoder_dropout=DINO_DECODER_DROPOUT,
+            local_files_only=DINO_LOCAL_FILES_ONLY,
+        ).to(DEVICE)
         dino_optimizer = torch.optim.AdamW(dino_model.head.parameters(), lr=DINO_LR, weight_decay=DINO_WEIGHT_DECAY)
         dino_loss = nn.BCEWithLogitsLoss()
         dino_scaler = torch.cuda.amp.GradScaler(enabled=(DEVICE == "cuda"))
@@ -1186,14 +1099,17 @@ if DINO_ONLY:
     if dino_model is None:
         if not DINO_CKPT_PATH.exists():
             raise FileNotFoundError(f"[DINO] checkpoint não encontrado: {DINO_CKPT_PATH}")
-        dino_model = DinoSeg(DINO_PATH).to(DEVICE)
+        dino_model = dinov2.DinoSeg(
+            DINO_PATH,
+            decoder_dropout=DINO_DECODER_DROPOUT,
+            local_files_only=DINO_LOCAL_FILES_ONLY,
+        ).to(DEVICE)
         ckpt = torch.load(DINO_CKPT_PATH, map_location=DEVICE)
         dino_model.head.load_state_dict(ckpt["head_state"])
         dino_model.eval()
         print("[DINO] carregado checkpoint ->", DINO_CKPT_PATH)
 
 # %% [markdown]
-# <a id="fase-4"></a>
 # ## Fase 4 — Geração de `submission.csv` (roteiro oficial)
 #
 # A competição pede **segmentação** de regiões de copy-move e usa uma variante do **F1-score**,
@@ -1217,16 +1133,13 @@ if DINO_ONLY:
 
 # %%
 # Fase 4 — Célula 8: Imports + leitura de dados (roteiro oficial)
-import json
 import pandas as pd
 from PIL import Image
 from pathlib import Path
 import matplotlib.pyplot as plt
 
-# No Kaggle, o dataset costuma ficar aqui; se não existir, usa o DATA_ROOT detectado.
-DATA_DIR = Path("/kaggle/input/recodai-luc-scientific-image-forgery-detection")
-if not DATA_DIR.exists():
-    DATA_DIR = DATA_ROOT
+# Usa o DATA_ROOT detectado na Fase 1 (evita path hardcoded do Kaggle).
+DATA_DIR = DATA_ROOT
 
 TRAIN_DIR = DATA_DIR / "train_images"
 TEST_DIR = DATA_DIR / "test_images"
@@ -1250,60 +1163,12 @@ print("#test images:", len(test_images))
 
 # %%
 # Fase 4 — Célula 9: Funções RLE (roteiro oficial)
-# A métrica oficial usa JSON para a lista de pares [start, length, ...]
-# e suporta múltiplas instâncias separadas por ';'.
-def _rle_encode_single(mask: np.ndarray, fg_val: int = 1) -> list[int]:
-    # Kaggle oficial usa ordem coluna-major (Fortran).
-    dots = np.where(mask.flatten(order="F") == fg_val)[0]
-    run_lengths: list[int] = []
-    prev = -2
-    for b in dots:
-        b = int(b)
-        if b > prev + 1:
-            run_lengths.extend([b + 1, 0])  # start 1-based
-        run_lengths[-1] += 1
-        prev = b
-    return run_lengths
-
-
-def rle_encode(masks: list[np.ndarray] | np.ndarray, fg_val: int = 1) -> str:
-    if isinstance(masks, np.ndarray):
-        masks = [masks]
-    parts: list[str] = []
-    for m in masks:
-        runs = _rle_encode_single(m, fg_val=fg_val)
-        if runs:
-            parts.append(json.dumps(runs))
-    if not parts:
-        return "authentic"
-    return ";".join(parts)
+# A competição usa JSON para a lista de pares [start, length, ...] e suporta múltiplas instâncias separadas por ';'.
+from forgeryseg.rle import encode_instances
 
 
 def encode_submission(mask_union: np.ndarray) -> str:
-    if int(mask_union.sum()) <= 0:
-        return "authentic"
-    return rle_encode(mask_union.astype(np.uint8))
-
-
-def rle_decode(annotation: str, shape: tuple[int, int]) -> list[np.ndarray]:
-    text = annotation.strip()
-    if text == "" or text.lower() == "authentic":
-        return []
-    masks: list[np.ndarray] = []
-    for part in text.split(";"):
-        part = part.strip()
-        if not part:
-            continue
-        runs = json.loads(part)
-        mask = np.zeros(shape[0] * shape[1], dtype=np.uint8)
-        for start, length in zip(runs[0::2], runs[1::2]):
-            if int(length) <= 0:
-                continue
-            start_index = int(start) - 1  # 1-based -> 0-based
-            end_index = start_index + int(length)
-            mask[start_index:end_index] = 1
-        masks.append(mask.reshape(shape, order="F"))
-    return masks
+    return encode_instances(mask_union)
 
 # %%
 # Fase 4 — Célula 10: Baseline simples (tudo authentic)
@@ -1331,38 +1196,11 @@ if USE_MODEL_SUBMISSION:
     if "model" not in globals():
         raise RuntimeError("Defina a variável `model` antes de ativar FORGERYSEG_USE_MODEL_SUBMISSION=1.")
 
+    from forgeryseg.inference import apply_tta, undo_tta
+
     USE_TTA = _env_bool("FORGERYSEG_TTA", default=True)
     TTA_MODES = ("none", "hflip", "vflip", "rot90", "rot180", "rot270")
 
-    def _apply_tta(image: np.ndarray, mode: str) -> np.ndarray:
-        if mode == "none":
-            return image
-        if mode == "hflip":
-            return np.ascontiguousarray(image[:, ::-1])
-        if mode == "vflip":
-            return np.ascontiguousarray(image[::-1, :])
-        if mode == "rot90":
-            return np.ascontiguousarray(np.rot90(image, k=1))
-        if mode == "rot180":
-            return np.ascontiguousarray(np.rot90(image, k=2))
-        if mode == "rot270":
-            return np.ascontiguousarray(np.rot90(image, k=3))
-        raise ValueError(f"TTA mode inválido: {mode}")
-
-    def _undo_tta(mask: np.ndarray, mode: str) -> np.ndarray:
-        if mode == "none":
-            return mask
-        if mode == "hflip":
-            return np.ascontiguousarray(mask[:, ::-1])
-        if mode == "vflip":
-            return np.ascontiguousarray(mask[::-1, :])
-        if mode == "rot90":
-            return np.ascontiguousarray(np.rot90(mask, k=3))
-        if mode == "rot180":
-            return np.ascontiguousarray(np.rot90(mask, k=2))
-        if mode == "rot270":
-            return np.ascontiguousarray(np.rot90(mask, k=1))
-        raise ValueError(f"TTA mode inválido: {mode}")
 
     def _default_predict_fn(image: np.ndarray) -> np.ndarray:
         if hasattr(model, "predict"):
@@ -1383,9 +1221,9 @@ if USE_MODEL_SUBMISSION:
             return _default_predict_fn(image)
         preds = []
         for mode in TTA_MODES:
-            img_t = _apply_tta(image, mode)
+            img_t = apply_tta(image, mode)
             pred_t = _default_predict_fn(img_t)
-            pred = _undo_tta(pred_t, mode)
+            pred = undo_tta(pred_t, mode)
             preds.append(pred)
         return np.mean(preds, axis=0)
 
@@ -1422,35 +1260,8 @@ if DINO_ONLY:
 
     TTA_MODES = ("none", "hflip", "vflip", "rot90", "rot180", "rot270")
 
-    def _apply_tta(img: np.ndarray, mode: str) -> np.ndarray:
-        if mode == "none":
-            return img
-        if mode == "hflip":
-            return np.ascontiguousarray(img[:, ::-1])
-        if mode == "vflip":
-            return np.ascontiguousarray(img[::-1, :])
-        if mode == "rot90":
-            return np.ascontiguousarray(np.rot90(img, k=1))
-        if mode == "rot180":
-            return np.ascontiguousarray(np.rot90(img, k=2))
-        if mode == "rot270":
-            return np.ascontiguousarray(np.rot90(img, k=3))
-        raise ValueError(f"TTA mode inválido: {mode}")
+    from forgeryseg.inference import apply_tta, undo_tta
 
-    def _undo_tta(mask: np.ndarray, mode: str) -> np.ndarray:
-        if mode == "none":
-            return mask
-        if mode == "hflip":
-            return np.ascontiguousarray(mask[:, ::-1])
-        if mode == "vflip":
-            return np.ascontiguousarray(mask[::-1, :])
-        if mode == "rot90":
-            return np.ascontiguousarray(np.rot90(mask, k=3))
-        if mode == "rot180":
-            return np.ascontiguousarray(np.rot90(mask, k=2))
-        if mode == "rot270":
-            return np.ascontiguousarray(np.rot90(mask, k=1))
-        raise ValueError(f"TTA mode inválido: {mode}")
 
     @torch.no_grad()
     def _dino_predict_prob(img_rgb: np.ndarray) -> np.ndarray:
@@ -1469,9 +1280,9 @@ if DINO_ONLY:
             return _dino_predict_prob(img_rgb)
         preds = []
         for mode in TTA_MODES:
-            img_t = _apply_tta(img_rgb, mode)
+            img_t = apply_tta(img_rgb, mode)
             prob_t = _dino_predict_prob(img_t)
-            prob = _undo_tta(prob_t, mode)
+            prob = undo_tta(prob_t, mode)
             preds.append(prob)
         return np.mean(preds, axis=0).astype(np.float32)
 
@@ -1517,13 +1328,15 @@ else:
 submission_path = _write_submission_csv(submissions_to_save)
 print("Wrote:", submission_path)
 
+
 # %% [markdown]
-# <a id="fase-4b"></a>
 # ## Fase 4b — Submissão via `submit_ensemble.py` (opcional)
 #
 # - Usa os checkpoints em `outputs/models_seg/...`.
 # - Respeita o `configs/infer_ensemble.json` (inclui gate do classificador e pesos do ensemble).
 #
+# Para desligar/ligar: `FORGERYSEG_RUN_SUBMISSION_SCRIPT=0|1`.
+
 # %%
 # Fase 4b — Célula 13: Gerar submission.csv via script (opcional)
 RUN_SUBMISSION_SCRIPT = True  # Sempre ativo; não desabilitar neste notebook.
@@ -1549,8 +1362,10 @@ def _find_submit_ensemble_script() -> Path:
         if p.exists():
             return p
     raise FileNotFoundError(
-        "Não encontrei `scripts/submit_ensemble.py`.\n"
-        "- Solução (Kaggle): anexe o dataset do repositório (bundle) contendo `scripts/`.\n"
+        "Não encontrei `scripts/submit_ensemble.py`.
+"
+        "- Solução (Kaggle): anexe o dataset do repositório (bundle) contendo `scripts/`.
+"
         "- Solução (local): rode a partir do root do repo (onde existe `scripts/`)."
     )
 
@@ -1637,3 +1452,4 @@ else:
         print("[SUBMISSION] running:", " ".join(cmd))
         subprocess.check_call(cmd)
         print("[SUBMISSION] wrote:", submission_path)
+

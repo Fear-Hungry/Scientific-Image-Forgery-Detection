@@ -124,7 +124,17 @@ def build_classifier(
     if backend == "timm":
         if timm is None:
             raise ImportError("timm is required for backend='timm'")
-        return timm.create_model(model_name, pretrained=bool(pretrained), num_classes=int(num_classes), **kwargs)
+        checkpoint_path = kwargs.pop("checkpoint_path", None)
+        model = timm.create_model(model_name, pretrained=bool(pretrained), num_classes=int(num_classes), **kwargs)
+        if checkpoint_path:
+            import torch
+            # Load state dict from local file
+            state_dict = torch.load(checkpoint_path, map_location="cpu")
+            # Handle potential key mismatches (e.g. if saved model has 'module.' prefix or different head)
+            missing, unexpected = model.load_state_dict(state_dict, strict=False)
+            if missing or unexpected:
+                print(f"[WARN] Loading weights from {checkpoint_path}: missing={len(missing)}, unexpected={len(unexpected)}")
+        return model
 
     if backend == "torchvision":
         try:

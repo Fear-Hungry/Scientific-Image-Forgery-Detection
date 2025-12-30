@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Sequence
 
 import numpy as np
 
@@ -273,3 +273,97 @@ class PatchDataset:
         if self.return_meta:
             return image_tensor, mask_tensor, sample
         return image_tensor, mask_tensor
+
+
+class DinoSegDataset:
+    """
+    Minimal dataset for the "DINO-only" notebook path.
+
+    - Loads RGB images.
+    - Resizes image + union mask to a fixed square `image_size`.
+    - Applies lightweight geometric augmentation during training.
+    """
+
+    def __init__(
+        self,
+        samples: Sequence[Sample],
+        image_size: int,
+        *,
+        train: bool,
+        seed: int = 42,
+        p_hflip: float = 0.5,
+        p_vflip: float = 0.5,
+        p_rot90: float = 0.25,
+    ) -> None:
+        self.samples = list(samples)
+        self.image_size = int(image_size)
+        self.train = bool(train)
+        self.seed = int(seed)
+        self.p_hflip = float(p_hflip)
+        self.p_vflip = float(p_vflip)
+        self.p_rot90 = float(p_rot90)
+
+    def __len__(self) -> int:
+        return len(self.samples)
+
+    def _load_union_mask_resized(self, mask_path: Optional[Path]) -> np.ndarray:
+        import cv2
+
+        out_size = int(self.image_size)
+        if mask_path is None:
+            return np.zeros((out_size, out_size), dtype=np.uint8)
+        masks = np.load(mask_path)
+        if masks.ndim == 2:
+            union = masks
+        else:
+            union = masks.max(axis=0)
+        union = (union > 0).astype(np.uint8)
+        if union.shape != (out_size, out_size):
+            union = cv2.resize(union, (out_size, out_size), interpolation=cv2.INTER_NEAREST)
+        return union
+
+    def __getitem__(self, idx: int):
+        import torch
+        import cv2
+
+        sample = self.samples[int(idx)]
+        image = load_image(sample.image_path, as_rgb=True)
+        image = cv2.resize(image, (self.image_size, self.image_size), interpolation=cv2.INTER_AREA)
+        mask = self._load_union_mask_resized(sample.mask_path)
+
+        if self.train:
+            worker_info = torch.utils.data.get_worker_info()
+            worker_id = worker_info.id if worker_info is not None else 0
+            rng = np.random.default_rng(self.seed + idx + worker_id * 100000)
+            if rng.random() < self.p_hflip:
+                image = np.ascontiguousarray(image[:, ::-1])
+                mask = np.ascontiguousarray(mask[:, ::-1])
+            if rng.random() < self.p_vflip:
+                image = np.ascontiguousarray(image[::-1, :])
+                mask = np.ascontiguousarray(mask[::-1, :])
+            if rng.random() < self.p_rot90:
+                image = np.ascontiguousarray(np.rot90(image, k=1))
+                mask = np.ascontiguousarray(np.rot90(mask, k=1))
+
+        image = torch.from_numpy(image).permute(2, 0, 1).float() / 255.0
+        mask = torch.from_numpy(mask).unsqueeze(0).float()
+        return image, mask
+
+
+class ClsDataset:
+    def __init__(self, samples: Sequence[Sample], transform):
+        self.samples = list(samples)
+        self.transform = transform
+
+    def __len__(self) -> int:
+        return len(self.samples)
+
+    def __getitem__(self, idx: int):
+        import torch
+        from PIL import Image
+
+        s = self.samples[int(idx)]
+        img = Image.open(s.image_path).convert("RGB")
+        x = self.transform(img)
+        y = torch.tensor([0.0 if s.is_authentic else 1.0], dtype=torch.float32)
+        return x, y

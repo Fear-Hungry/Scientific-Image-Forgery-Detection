@@ -10,7 +10,13 @@ Repositório com um *snapshot* dos dados da competição do Kaggle **“Recod.ai
 - [Visão geral](#visão-geral)
 - [Cronograma e premiação](#cronograma-e-premiação)
 - [O desafio](#o-desafio)
+  - [Entrada](#entrada)
+  - [Saída esperada](#saída-esperada)
+  - [Por que é difícil](#por-que-é-difícil)
 - [Dados (estrutura e formatos)](#dados-estrutura-e-formatos)
+  - [Estatísticas do snapshot deste repo](#estatísticas-do-snapshot-deste-repo)
+  - [Imagens](#imagens)
+  - [Máscaras (ground truth)](#máscaras-ground-truth)
 - [Notebooks (Kaggle)](#notebooks-kaggle)
 - [Formato de submissão](#formato-de-submissão)
 - [Run-Length Encoding (RLE)](#run-length-encoding-rle)
@@ -113,7 +119,7 @@ Notebook pronto para uso no Kaggle (internet OFF no submit). Importa o código d
 Fluxo típico (Kaggle):
 
 1) Anexe o dataset da competição (`recodai-luc-scientific-image-forgery-detection`).
-2) (Opcional) Importe este repositório como Kaggle Dataset (via GitHub) para ter `recodai_bundle/wheels/` e `src/` disponíveis offline.
+2) (Opcional) Importe este repositório como Kaggle Dataset (via GitHub) para ter `recodai_bundle/wheels/`, `src/` e `weights_cache/` disponíveis offline (pesos pré-treinados em `.pth`).
 3) Se treinar, os checkpoints ficam em `/kaggle/working/outputs/...`. Para reutilizar, use “Save & Create Dataset” a partir do notebook e anexe o dataset de outputs depois.
 
 ## Formato de submissão

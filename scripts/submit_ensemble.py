@@ -22,7 +22,7 @@ sys.path.insert(0, str(SRC_ROOT))
 from forgeryseg.checkpoints import build_classifier_from_config, build_segmentation_from_config, load_checkpoint
 from forgeryseg.constants import AUTHENTIC_LABEL
 from forgeryseg.dataset import build_test_index, load_image
-from forgeryseg.inference import normalize_image, predict_image
+from forgeryseg.inference import apply_tta, normalize_image, predict_image, undo_tta
 from forgeryseg.postprocess import prob_to_instances
 from forgeryseg.rle import encode_instances
 
@@ -93,30 +93,6 @@ def _find_models_dir(dir_name: str, explicit: str | None) -> Path:
 
 def _parse_csv_list(text: str) -> list[str]:
     return [t.strip() for t in str(text).split(",") if t.strip()]
-
-
-def _apply_tta(image: np.ndarray, mode: str) -> np.ndarray:
-    if mode == "none":
-        return image
-    if mode == "hflip":
-        return np.ascontiguousarray(image[:, ::-1])
-    if mode == "vflip":
-        return np.ascontiguousarray(image[::-1, :])
-    if mode == "hvflip":
-        return np.ascontiguousarray(image[::-1, ::-1])
-    raise ValueError(f"tta mode inválido: {mode}")
-
-
-def _undo_tta(mask: np.ndarray, mode: str) -> np.ndarray:
-    if mode == "none":
-        return mask
-    if mode == "hflip":
-        return np.ascontiguousarray(mask[:, ::-1])
-    if mode == "vflip":
-        return np.ascontiguousarray(mask[::-1, :])
-    if mode == "hvflip":
-        return np.ascontiguousarray(mask[::-1, ::-1])
-    raise ValueError(f"tta mode inválido: {mode}")
 
 
 def _find_checkpoint_paths(models_dir: Path) -> tuple[str, list[Path]]:
@@ -293,7 +269,7 @@ def predict_seg_ensemble_prob(
     wsum = float(sum(weights)) if weights else 1.0
 
     for mode in modes:
-        img_t = _apply_tta(image, mode)
+        img_t = apply_tta(image, mode)
         ens: np.ndarray | None = None
         for e in entries:
             p = predict_image(e.model, img_t, device, tile_size=tile_size, overlap=overlap, max_size=max_size)
@@ -301,7 +277,7 @@ def predict_seg_ensemble_prob(
             ens = p if ens is None else (ens + p)
         assert ens is not None
         ens = ens / wsum
-        ens = _undo_tta(ens, mode)
+        ens = undo_tta(ens, mode)
         prob_sum = ens if prob_sum is None else (prob_sum + ens)
         count += 1
 

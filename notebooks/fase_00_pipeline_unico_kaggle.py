@@ -958,6 +958,12 @@ if DINO_ONLY:
     DINO_MORPH_OPEN_K = int(os.environ.get("FORGERYSEG_DINO_OPEN_K", "3"))
     DINO_MORPH_ITERS = int(os.environ.get("FORGERYSEG_DINO_MORPH_ITERS", "1"))
     DINO_USE_TTA = _env_bool("FORGERYSEG_DINO_TTA", default=True)
+    DINO_USE_INSTANCES = _env_bool("FORGERYSEG_DINO_USE_INSTANCES", default=True)
+    DINO_ADAPTIVE_THRESHOLD = _env_bool("FORGERYSEG_DINO_ADAPTIVE_THR", default=True)
+    DINO_THRESHOLD = float(os.environ.get("FORGERYSEG_DINO_THRESHOLD", "0.5"))
+    DINO_MORPH_CLOSE_ITERS = int(os.environ.get("FORGERYSEG_DINO_CLOSE_ITERS", str(DINO_MORPH_ITERS)))
+    DINO_MORPH_OPEN_ITERS = int(os.environ.get("FORGERYSEG_DINO_OPEN_ITERS", str(DINO_MORPH_ITERS)))
+    DINO_BEST_CONFIG = os.environ.get("FORGERYSEG_DINO_BEST_CONFIG", "outputs/dino_thresholds.json")
 
     print("DINO_PATH:", DINO_PATH)
     print("DINO_IMAGE_SIZE:", DINO_IMAGE_SIZE)
@@ -967,6 +973,8 @@ if DINO_ONLY:
     print("DINO_MIN_AREA:", DINO_MIN_AREA, "DINO_MIN_AREA_PERCENT:", DINO_MIN_AREA_PERCENT)
     print("DINO_MIN_CONFIDENCE:", DINO_MIN_CONFIDENCE)
     print("DINO_USE_TTA:", DINO_USE_TTA)
+    print("DINO_USE_INSTANCES:", DINO_USE_INSTANCES)
+    print("DINO_MORPH_CLOSE_ITERS:", DINO_MORPH_CLOSE_ITERS, "DINO_MORPH_OPEN_ITERS:", DINO_MORPH_OPEN_ITERS)
 
     if str(DINO_PATH).startswith("/") and not Path(DINO_PATH).exists():
         raise FileNotFoundError(f"[DINO] caminho não encontrado: {DINO_PATH}")
@@ -1003,16 +1011,52 @@ if DINO_ONLY:
                 out[labels == idx] = 1
         return out
 
+    # Carregar melhor config (se existir) para usar na submissão
+    try:
+        _best_cfg_path = Path(DINO_BEST_CONFIG)
+        if _best_cfg_path.exists():
+            import json as _json
+
+            _best_cfg = _json.loads(_best_cfg_path.read_text())
+            DINO_ADAPTIVE_THRESHOLD = bool(_best_cfg.get("adaptive_threshold", DINO_ADAPTIVE_THRESHOLD))
+            if DINO_ADAPTIVE_THRESHOLD:
+                DINO_THR_FACTOR = float(_best_cfg.get("threshold_factor", DINO_THR_FACTOR))
+            else:
+                if _best_cfg.get("threshold") is not None:
+                    DINO_THRESHOLD = float(_best_cfg.get("threshold", DINO_THRESHOLD))
+            if _best_cfg.get("min_area") is not None:
+                DINO_MIN_AREA = int(_best_cfg.get("min_area", DINO_MIN_AREA))
+            if _best_cfg.get("min_area_percent") is not None:
+                DINO_MIN_AREA_PERCENT = float(_best_cfg.get("min_area_percent", DINO_MIN_AREA_PERCENT))
+            if _best_cfg.get("min_confidence") is not None:
+                DINO_MIN_CONFIDENCE = float(_best_cfg.get("min_confidence", DINO_MIN_CONFIDENCE))
+            if _best_cfg.get("closing") is not None:
+                DINO_MORPH_CLOSE_K = int(_best_cfg.get("closing", DINO_MORPH_CLOSE_K))
+            if _best_cfg.get("opening") is not None:
+                DINO_MORPH_OPEN_K = int(_best_cfg.get("opening", DINO_MORPH_OPEN_K))
+            if _best_cfg.get("closing_iters") is not None:
+                DINO_MORPH_CLOSE_ITERS = int(_best_cfg.get("closing_iters", DINO_MORPH_CLOSE_ITERS))
+            if _best_cfg.get("opening_iters") is not None:
+                DINO_MORPH_OPEN_ITERS = int(_best_cfg.get("opening_iters", DINO_MORPH_OPEN_ITERS))
+            DINO_MORPH_ITERS = max(int(DINO_MORPH_CLOSE_ITERS), int(DINO_MORPH_OPEN_ITERS))
+            print("[DINO] best config loaded:", _best_cfg_path)
+    except Exception:
+        print("[DINO] falha ao carregar best config; seguindo com defaults.")
+        traceback.print_exc()
+
     def _postprocess_prob(prob: np.ndarray) -> np.ndarray:
-        thr = _adaptive_threshold_value(prob, factor=DINO_THR_FACTOR)
+        if DINO_ADAPTIVE_THRESHOLD:
+            thr = _adaptive_threshold_value(prob, factor=DINO_THR_FACTOR)
+        else:
+            thr = float(DINO_THRESHOLD)
         mask = (prob >= thr).astype(np.uint8)
 
         if DINO_MORPH_CLOSE_K > 0:
             kernel = np.ones((DINO_MORPH_CLOSE_K, DINO_MORPH_CLOSE_K), np.uint8)
-            mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=int(DINO_MORPH_ITERS))
+            mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=int(DINO_MORPH_CLOSE_ITERS))
         if DINO_MORPH_OPEN_K > 0:
             kernel = np.ones((DINO_MORPH_OPEN_K, DINO_MORPH_OPEN_K), np.uint8)
-            mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=int(DINO_MORPH_ITERS))
+            mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=int(DINO_MORPH_OPEN_ITERS))
 
         min_area = int(DINO_MIN_AREA)
         if float(DINO_MIN_AREA_PERCENT) > 0:
@@ -1108,6 +1152,262 @@ if DINO_ONLY:
         dino_model.head.load_state_dict(ckpt["head_state"])
         dino_model.eval()
         print("[DINO] carregado checkpoint ->", DINO_CKPT_PATH)
+
+# %%
+# Fase 3c — OOF + tuning (opcional, local)
+#
+# Habilite para rodar tudo dentro do notebook (CPU ok, pode demorar).
+# - FORGERYSEG_DINO_OOF=1 -> gera preds + score em runs/
+# - FORGERYSEG_DINO_OOF_TRAIN=1 -> treina head por fold antes do OOF
+# - FORGERYSEG_DINO_TUNE=1 -> faz grid search de pós-processamento
+# - FORGERYSEG_DINO_TUNE_APPLY=1 -> aplica os melhores parâmetros no próprio notebook
+
+if DINO_ONLY:
+    _default_oof = True
+    RUN_DINO_OOF = _env_bool("FORGERYSEG_DINO_OOF", default=_default_oof)
+    RUN_DINO_OOF_TRAIN = _env_bool("FORGERYSEG_DINO_OOF_TRAIN", default=_default_oof)
+    RUN_DINO_TUNE = _env_bool("FORGERYSEG_DINO_TUNE", default=_default_oof)
+
+    if RUN_DINO_OOF or RUN_DINO_TUNE:
+        from forgeryseg.dino_oof import predict_dino_oof, train_dino_head, tune_dino_thresholds
+
+        def _parse_int_list(text: str, default: list[int]) -> list[int]:
+            txt = str(text).strip()
+            if not txt:
+                return default
+            return [int(x) for x in txt.split(",") if x.strip()]
+
+        def _parse_float_list(text: str, default: list[float]) -> list[float]:
+            txt = str(text).strip()
+            if not txt:
+                return default
+            return [float(x) for x in txt.split(",") if x.strip()]
+
+        DINO_OOF_FOLDS = int(os.environ.get("FORGERYSEG_DINO_OOF_FOLDS", str(N_FOLDS)))
+        DINO_OOF_PRED_ROOT = os.environ.get("FORGERYSEG_DINO_OOF_PREDS", "outputs/preds_dino")
+        DINO_OOF_MODEL_DIR = os.environ.get("FORGERYSEG_DINO_OOF_MODEL_DIR", "outputs/models_dino")
+        DINO_OOF_TTA = os.environ.get("FORGERYSEG_DINO_OOF_TTA", "none,hflip,vflip,rot90,rot180,rot270")
+        DINO_OOF_LIMIT = int(os.environ.get("FORGERYSEG_DINO_OOF_LIMIT", "0"))
+        dino_oof_result = None
+
+        if RUN_DINO_OOF_TRAIN:
+            for _fold in range(int(DINO_OOF_FOLDS)):
+                print(f"[DINO OOF] training fold {_fold}/{DINO_OOF_FOLDS - 1} ...")
+                train_dino_head(
+                    data_root=DATA_ROOT,
+                    output_dir=DINO_OOF_MODEL_DIR,
+                    folds=int(DINO_OOF_FOLDS),
+                    fold=int(_fold),
+                    seed=int(SEED),
+                    dino_path=str(DINO_PATH),
+                    image_size=int(DINO_IMAGE_SIZE),
+                    batch_size=int(DINO_BATCH_SIZE),
+                    epochs=int(DINO_EPOCHS),
+                    lr=float(DINO_LR),
+                    weight_decay=float(DINO_WEIGHT_DECAY),
+                    decoder_dropout=float(DINO_DECODER_DROPOUT),
+                    patience=3,
+                    device=DEVICE,
+                    num_workers=int(NUM_WORKERS),
+                    local_files_only=bool(DINO_LOCAL_FILES_ONLY),
+                )
+
+        if RUN_DINO_OOF:
+            dino_oof_result = predict_dino_oof(
+                data_root=DATA_ROOT,
+                preds_root=DINO_OOF_PRED_ROOT,
+                folds=int(DINO_OOF_FOLDS),
+                fold=-1,
+                seed=int(SEED),
+                dino_path=str(DINO_PATH),
+                head_ckpt=None,
+                head_ckpt_dir=DINO_OOF_MODEL_DIR,
+                image_size=int(DINO_IMAGE_SIZE),
+                decoder_dropout=float(DINO_DECODER_DROPOUT),
+                device=DEVICE,
+                tta_modes=tuple(x.strip() for x in DINO_OOF_TTA.split(",") if x.strip()),
+                limit=int(DINO_OOF_LIMIT),
+                save_probs=True,
+                score=True,
+                threshold_factor=float(DINO_THR_FACTOR),
+                min_area=int(DINO_MIN_AREA),
+                min_area_percent=float(DINO_MIN_AREA_PERCENT),
+                min_confidence=float(DINO_MIN_CONFIDENCE),
+                closing=int(DINO_MORPH_CLOSE_K),
+                opening=int(DINO_MORPH_OPEN_K),
+                morph_iters=int(DINO_MORPH_ITERS),
+                closing_iters=int(DINO_MORPH_CLOSE_ITERS),
+                opening_iters=int(DINO_MORPH_OPEN_ITERS),
+                local_files_only=bool(DINO_LOCAL_FILES_ONLY),
+            )
+
+    if RUN_DINO_TUNE:
+        thr_factors = _parse_float_list(os.environ.get("FORGERYSEG_DINO_TUNE_THR_FACTORS", "0.1,0.2,0.3,0.4,0.5"), [0.3])
+        min_areas = _parse_int_list(os.environ.get("FORGERYSEG_DINO_TUNE_MIN_AREAS", "0,30,64,128"), [30])
+        min_area_perc = _parse_float_list(os.environ.get("FORGERYSEG_DINO_TUNE_MIN_AREA_PERC", "0.0002,0.0005,0.001"), [0.0005])
+        min_conf = _parse_float_list(os.environ.get("FORGERYSEG_DINO_TUNE_MIN_CONF", "0.25,0.30,0.33,0.36,0.40"), [0.33])
+        out_cfg = os.environ.get("FORGERYSEG_DINO_TUNE_OUT", "outputs/dino_thresholds.json")
+        best = tune_dino_thresholds(
+            data_root=DATA_ROOT,
+            preds_root=DINO_OOF_PRED_ROOT,
+            folds=int(DINO_OOF_FOLDS),
+            seed=int(SEED),
+            fold=-1,
+            adaptive_threshold=True,
+            threshold_factors=thr_factors,
+            min_areas=min_areas,
+            min_area_percents=min_area_perc,
+            min_confidences=min_conf,
+            closing=int(DINO_MORPH_CLOSE_K),
+            closing_iters=int(DINO_MORPH_CLOSE_ITERS),
+            opening=int(DINO_MORPH_OPEN_K),
+            opening_iters=int(DINO_MORPH_OPEN_ITERS),
+            out_config=out_cfg,
+        )
+        if _env_bool("FORGERYSEG_DINO_TUNE_APPLY", default=True):
+            DINO_ADAPTIVE_THRESHOLD = bool(best.get("adaptive_threshold", True))
+            if DINO_ADAPTIVE_THRESHOLD:
+                DINO_THR_FACTOR = float(best.get("threshold_factor", DINO_THR_FACTOR))
+            else:
+                if best.get("threshold") is not None:
+                    DINO_THRESHOLD = float(best.get("threshold"))
+            if best.get("min_area") is not None:
+                DINO_MIN_AREA = int(best.get("min_area"))
+            if best.get("min_area_percent") is not None:
+                DINO_MIN_AREA_PERCENT = float(best.get("min_area_percent"))
+            if best.get("min_confidence") is not None:
+                DINO_MIN_CONFIDENCE = float(best.get("min_confidence"))
+            if best.get("closing_iters") is not None:
+                DINO_MORPH_CLOSE_ITERS = int(best.get("closing_iters"))
+            if best.get("opening_iters") is not None:
+                DINO_MORPH_OPEN_ITERS = int(best.get("opening_iters"))
+            DINO_MORPH_ITERS = max(int(DINO_MORPH_CLOSE_ITERS), int(DINO_MORPH_OPEN_ITERS))
+            print("[DINO TUNE] applied best params:")
+            print(" - adaptive:", DINO_ADAPTIVE_THRESHOLD)
+            print(" - thr_factor:", DINO_THR_FACTOR, "thr_fixed:", DINO_THRESHOLD)
+            print(" - min_area:", DINO_MIN_AREA, "min_area_percent:", DINO_MIN_AREA_PERCENT)
+            print(" - min_confidence:", DINO_MIN_CONFIDENCE)
+
+# %%
+# Fase 3d — Score local (train) do pipeline DINO-only
+#
+# Calcula RecodAI F1 no train usando o modelo atual e o mesmo pos-processamento
+# da submissao. Pode ser custoso em CPU.
+
+if DINO_ONLY:
+    RUN_DINO_SCORE_TRAIN = _env_bool("FORGERYSEG_DINO_SCORE_TRAIN", default=True)
+    DINO_SCORE_LIMIT = int(os.environ.get("FORGERYSEG_DINO_SCORE_LIMIT", "0"))
+    DINO_SCORE_TTA = _env_bool("FORGERYSEG_DINO_SCORE_TTA", default=DINO_USE_TTA)
+    dino_train_score = None
+
+    if RUN_DINO_SCORE_TRAIN:
+        if dino_model is None:
+            raise RuntimeError("[DINO SCORE] modelo nao carregado.")
+        dino_model.eval()
+
+        from forgeryseg.dataset import load_image, load_mask_instances
+        from forgeryseg.metric import score_image
+        from forgeryseg.postprocess import dino_prob_to_instances
+        from forgeryseg.inference import apply_tta, undo_tta
+
+        import csv
+        from datetime import datetime
+
+        TTA_MODES = ("none", "hflip", "vflip", "rot90", "rot180", "rot270")
+
+        @torch.no_grad()
+        def _score_predict_prob(img_rgb: np.ndarray) -> np.ndarray:
+            orig_h, orig_w = img_rgb.shape[:2]
+            img_rs = cv2.resize(img_rgb, (DINO_IMAGE_SIZE, DINO_IMAGE_SIZE), interpolation=cv2.INTER_AREA)
+            x = torch.from_numpy(img_rs).permute(2, 0, 1).float().unsqueeze(0) / 255.0
+            x = x.to(DEVICE)
+            logits = dino_model(x)
+            prob = torch.sigmoid(logits)[0, 0].detach().cpu().numpy().astype(np.float32)
+            if prob.shape != (orig_h, orig_w):
+                prob = cv2.resize(prob, (orig_w, orig_h), interpolation=cv2.INTER_LINEAR)
+            return prob
+
+        def _score_tta_predict(img_rgb: np.ndarray) -> np.ndarray:
+            if not DINO_SCORE_TTA:
+                return _score_predict_prob(img_rgb)
+            preds = []
+            for mode in TTA_MODES:
+                img_t = apply_tta(img_rgb, mode)
+                prob_t = _score_predict_prob(img_t)
+                prob = undo_tta(prob_t, mode)
+                preds.append(prob)
+            return np.mean(preds, axis=0).astype(np.float32)
+
+        samples = train_samples
+        if DINO_SCORE_LIMIT > 0:
+            samples = samples[:DINO_SCORE_LIMIT]
+
+        scores = []
+        rows = []
+        for sample in samples:
+            img = load_image(sample.image_path, as_rgb=True)
+            prob = _score_tta_predict(img)
+            if DINO_USE_INSTANCES:
+                pred_instances = dino_prob_to_instances(
+                    prob,
+                    threshold_factor=DINO_THR_FACTOR,
+                    min_area=DINO_MIN_AREA,
+                    min_area_percent=DINO_MIN_AREA_PERCENT,
+                    min_confidence=DINO_MIN_CONFIDENCE,
+                    closing_ksize=DINO_MORPH_CLOSE_K,
+                    opening_ksize=DINO_MORPH_OPEN_K,
+                    morph_iters=DINO_MORPH_ITERS,
+                    closing_iters=DINO_MORPH_CLOSE_ITERS,
+                    opening_iters=DINO_MORPH_OPEN_ITERS,
+                    adaptive_threshold=DINO_ADAPTIVE_THRESHOLD,
+                    threshold=DINO_THRESHOLD,
+                )
+            else:
+                pred_instances = _postprocess_prob(prob)
+
+            gt_instances = load_mask_instances(sample.mask_path) if sample.mask_path else []
+            score_val = float(score_image(gt_instances, pred_instances))
+            scores.append(score_val)
+            rows.append({"case_id": sample.case_id, "score": score_val})
+
+        mean_score = float(np.mean(scores)) if scores else float("nan")
+        dino_train_score = float(mean_score)
+        print(f"[DINO SCORE] mean train RecodAI F1: {mean_score:.6f}")
+
+        run_dir = Path("runs") / f"dino_train_score_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        run_dir.mkdir(parents=True, exist_ok=True)
+        score_csv = run_dir / "scores.csv"
+        with score_csv.open("w", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=["case_id", "score"])
+            writer.writeheader()
+            writer.writerows(rows)
+        print("[DINO SCORE] wrote:", score_csv)
+
+# %%
+# Fase 3e — Report rapido (OOF + parametros + score)
+if DINO_ONLY:
+    print("=== DINO REPORT ===")
+    print("DINO_PATH:", DINO_PATH)
+    print("IMAGE_SIZE:", DINO_IMAGE_SIZE)
+    print("USE_TTA:", DINO_USE_TTA)
+    print("USE_INSTANCES:", DINO_USE_INSTANCES)
+    print("ADAPTIVE_THR:", DINO_ADAPTIVE_THRESHOLD)
+    print("THR_FACTOR:", DINO_THR_FACTOR, "THR_FIXED:", DINO_THRESHOLD)
+    print("MIN_AREA:", DINO_MIN_AREA, "MIN_AREA_PERCENT:", DINO_MIN_AREA_PERCENT)
+    print("MIN_CONFIDENCE:", DINO_MIN_CONFIDENCE)
+    print("CLOSE_K:", DINO_MORPH_CLOSE_K, "CLOSE_ITERS:", DINO_MORPH_CLOSE_ITERS)
+    print("OPEN_K:", DINO_MORPH_OPEN_K, "OPEN_ITERS:", DINO_MORPH_OPEN_ITERS)
+
+    if "dino_oof_result" in globals() and dino_oof_result is not None:
+        try:
+            print("OOF mean score:", dino_oof_result.mean_score)
+            print("OOF fold scores:", dino_oof_result.fold_scores)
+            print("OOF run_dir:", dino_oof_result.run_dir)
+        except Exception:
+            pass
+    if "dino_train_score" in globals() and dino_train_score is not None:
+        print("Train mean score:", dino_train_score)
+    print("===================")
 
 # %% [markdown]
 # ## Fase 4 — Geração de `submission.csv` (roteiro oficial)
@@ -1261,6 +1561,7 @@ if DINO_ONLY:
     TTA_MODES = ("none", "hflip", "vflip", "rot90", "rot180", "rot270")
 
     from forgeryseg.inference import apply_tta, undo_tta
+    from forgeryseg.postprocess import dino_prob_to_instances
 
 
     @torch.no_grad()
@@ -1294,8 +1595,25 @@ if DINO_ONLY:
         img_path = test_by_id[key]
         img = np.array(Image.open(img_path).convert("RGB"))
         prob = _dino_tta_predict(img)
-        mask = _postprocess_prob(prob)
-        annotations.append(encode_submission(mask))
+        if DINO_USE_INSTANCES:
+            instances = dino_prob_to_instances(
+                prob,
+                threshold_factor=DINO_THR_FACTOR,
+                min_area=DINO_MIN_AREA,
+                min_area_percent=DINO_MIN_AREA_PERCENT,
+                min_confidence=DINO_MIN_CONFIDENCE,
+                closing_ksize=DINO_MORPH_CLOSE_K,
+                opening_ksize=DINO_MORPH_OPEN_K,
+                morph_iters=DINO_MORPH_ITERS,
+                closing_iters=DINO_MORPH_CLOSE_ITERS,
+                opening_iters=DINO_MORPH_OPEN_ITERS,
+                adaptive_threshold=DINO_ADAPTIVE_THRESHOLD,
+                threshold=DINO_THRESHOLD,
+            )
+            annotations.append(encode_submission(instances))
+        else:
+            mask = _postprocess_prob(prob)
+            annotations.append(encode_submission(mask))
 
     submissions_from_dino = pd.DataFrame(
         {
@@ -1362,10 +1680,8 @@ def _find_submit_ensemble_script() -> Path:
         if p.exists():
             return p
     raise FileNotFoundError(
-        "Não encontrei `scripts/submit_ensemble.py`.
-"
-        "- Solução (Kaggle): anexe o dataset do repositório (bundle) contendo `scripts/`.
-"
+        "Não encontrei `scripts/submit_ensemble.py`.\n"
+        "- Solução (Kaggle): anexe o dataset do repositório (bundle) contendo `scripts/`.\n"
         "- Solução (local): rode a partir do root do repo (onde existe `scripts/`)."
     )
 
@@ -1452,4 +1768,3 @@ else:
         print("[SUBMISSION] running:", " ".join(cmd))
         subprocess.check_call(cmd)
         print("[SUBMISSION] wrote:", submission_path)
-

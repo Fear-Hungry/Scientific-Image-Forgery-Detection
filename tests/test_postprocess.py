@@ -56,3 +56,42 @@ def test_prob_to_instances_min_area_percent_filters_small_masks():
     prob[1:3, 1:3] = 0.9
     instances = prob_to_instances(prob, threshold=0.5, min_area_percent=0.5)
     assert instances == []
+
+
+def test_dino_prob_to_instances_matches_prob_to_instances_defaults():
+    pytest.importorskip("scipy")
+    from forgeryseg.postprocess import dino_prob_to_instances, mask_from_instances, prob_to_instances
+
+    prob = np.zeros((6, 6), dtype=np.float32)
+    prob[1:3, 1:3] = 0.9
+    prob[3:5, 3:5] = 0.8
+
+    inst_dino = dino_prob_to_instances(
+        prob,
+        threshold_factor=0.0,
+        min_area=0,
+        min_area_percent=0.0,
+        min_confidence=0.0,
+        closing_ksize=0,
+        opening_ksize=0,
+        morph_iters=1,
+        adaptive_threshold=True,
+        threshold=0.5,
+    )
+    inst_ref = prob_to_instances(
+        prob,
+        threshold=0.5,
+        adaptive_threshold=True,
+        threshold_factor=0.0,
+        min_area=0,
+        min_area_percent=0.0,
+        min_confidence=0.0,
+        closing_ksize=0,
+        opening_ksize=0,
+        closing_iters=1,
+        opening_iters=1,
+    )
+
+    union_dino = mask_from_instances(inst_dino, prob.shape)
+    union_ref = mask_from_instances(inst_ref, prob.shape)
+    assert np.array_equal(union_dino, union_ref)

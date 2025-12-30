@@ -202,6 +202,44 @@ def prob_to_instances(
     return instances
 
 
+def dino_prob_to_instances(
+    prob: np.ndarray,
+    *,
+    threshold_factor: float = 0.3,
+    min_area: int = 30,
+    min_area_percent: float = 0.0005,
+    min_confidence: float = 0.33,
+    closing_ksize: int = 5,
+    opening_ksize: int = 3,
+    morph_iters: int = 1,
+    closing_iters: int | None = None,
+    opening_iters: int | None = None,
+    adaptive_threshold: bool = True,
+    threshold: float = 0.5,
+) -> List[np.ndarray]:
+    """
+    DINO-only helper: map the notebook's postprocess knobs to prob_to_instances().
+
+    Uses adaptive thresholding by default (mean + factor * std) and supports
+    optional morphology. Returns a list of instance masks (not a union mask).
+    """
+    close_iters = int(morph_iters if closing_iters is None else closing_iters)
+    open_iters = int(morph_iters if opening_iters is None else opening_iters)
+    return prob_to_instances(
+        prob,
+        threshold=float(threshold),
+        adaptive_threshold=bool(adaptive_threshold),
+        threshold_factor=float(threshold_factor),
+        min_area=int(min_area),
+        min_area_percent=float(min_area_percent),
+        min_confidence=float(min_confidence),
+        closing_ksize=int(closing_ksize),
+        closing_iters=close_iters,
+        opening_ksize=int(opening_ksize),
+        opening_iters=open_iters,
+    )
+
+
 def adaptive_threshold_value(prob: np.ndarray, factor: float = 0.3) -> float:
     """
     Compute an adaptive threshold: mean + factor * std, clamped to [0, 1].

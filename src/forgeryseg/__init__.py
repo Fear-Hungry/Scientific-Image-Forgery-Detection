@@ -9,6 +9,7 @@ __all__ = [
     "losses",
     "metric",
     "models",
+    "dino_oof",
     "postprocess",
     "rle",
     "train",

@@ -33,7 +33,7 @@
 #
 # Recomendação (workflow Kaggle):
 #
-# 1) Rode este notebook com **Internet ON** (treino/baixar pesos pretrained).
+# 1) Rode este notebook com **Internet ON** (**obrigatório**) para treinar/baixar pesos pretrained.
 # 2) Baixe `outputs_pretrain.zip` gerado em `/kaggle/working/`.
 # 3) Crie um **Kaggle Dataset** contendo a pasta `outputs/` (com `models_seg/` e `models_cls/`).
 # 4) No notebook de submissão (internet OFF), anexe esse Dataset (ele será detectado automaticamente).
@@ -44,10 +44,12 @@
 # - `FORGERYSEG_REPO_ROOT`: path do repo (ex.: `/kaggle/input/<ds>/recodai_bundle`).
 # - `FORGERYSEG_N_FOLDS`: default `5`.
 # - `FORGERYSEG_FOLD`: `0` (um fold) ou `-1` (todos).
-# - `FORGERYSEG_RUN_TRAIN_SEG`: `1/0`.
-# - `FORGERYSEG_RUN_TRAIN_CLS`: `1/0`.
-# - `FORGERYSEG_PIP_INSTALL=1`: instala deps via `requirements.txt` (usa internet).
-# - `FORGERYSEG_INSTALL_WHEELS=1`: instala deps via wheels locais (offline-safe).
+# - `FORGERYSEG_PROFILE`: `quick|sweep|full` (controla budget/épocas padrão).
+# - `FORGERYSEG_SEG_LEVEL`: `base|plus|max` (quantidade de variações de segmentação).
+# - `FORGERYSEG_SEG_FILTER`: filtra nomes (ex.: `convnext,segformer`).
+# - `FORGERYSEG_CLS_ACTIVE`: escolhe 1 classificador (evita sobrescrita em `models_cls/`).
+#
+# Este notebook assume internet ligada sempre; não há modo offline aqui.
 
 # %%
 import json
@@ -254,41 +256,39 @@ print("OUTPUTS_ROOT:", OUTPUTS_ROOT)
 # Instalação (opcional)
 #
 # Para treino no Kaggle com Internet ON, o ambiente costuma já ter torch/torchvision.
-# Se faltar algo (ex.: segmentation_models_pytorch), use uma das opções:
-#
-# - `FORGERYSEG_PIP_INSTALL=1` (usa internet)
-# - `FORGERYSEG_INSTALL_WHEELS=1` (usa wheels locais, offline-safe)
-
-ALLOW_DOWNLOAD = env_bool("FORGERYSEG_ALLOW_DOWNLOAD", default=True)
-RUN_PIP_INSTALL = env_bool("FORGERYSEG_PIP_INSTALL", default=False)
-INSTALL_WHEELS = env_bool("FORGERYSEG_INSTALL_WHEELS", default=False)
-
-WHEELS_ROOT = find_wheels_root(REPO_ROOT) if INSTALL_WHEELS else None
-if INSTALL_WHEELS:
-    if WHEELS_ROOT is None:
-        raise FileNotFoundError(
-            "FORGERYSEG_INSTALL_WHEELS=1, mas não encontrei pasta com wheels. "
-            "Use `recodai_bundle/wheels/` ou defina `FORGERYSEG_WHEELS_ROOT`."
-        )
-    maybe_install_from_wheels(WHEELS_ROOT)
-
-if RUN_PIP_INSTALL:
-    req_path = find_requirements_file(REPO_ROOT)
-    if req_path is None:
-        raise FileNotFoundError(f"Não encontrei requirements.txt em {REPO_ROOT}")
-    run_cmd([sys.executable, "-m", "pip", "install", "-r", str(req_path)])
-
-
-# %%
-# Checagem mínima de dependências
-required = ["torch", "numpy", "cv2", "albumentations", "timm", "segmentation_models_pytorch"]
+# Se faltar algo (ex.: segmentation_models_pytorch), instalamos automaticamente via pip.
+required = [
+    "torch",
+    "numpy",
+    "cv2",
+    "albumentations",
+    "timm",
+    "segmentation_models_pytorch",
+    "transformers",
+    "sklearn",
+]
 missing = _missing_modules(required)
 if missing:
-    raise ImportError(
-        "Dependências faltando: "
-        + ", ".join(missing)
-        + "\nSugestão: rode com `FORGERYSEG_PIP_INSTALL=1` (internet) ou `FORGERYSEG_INSTALL_WHEELS=1` (wheels)."
-    )
+    module_to_pip = {
+        "albumentations": "albumentations",
+        "cv2": "opencv-python",
+        "segmentation_models_pytorch": "segmentation-models-pytorch",
+        "timm": "timm",
+        "transformers": "transformers",
+        "sklearn": "scikit-learn",
+    }
+    pkgs = [module_to_pip[m] for m in missing if m in module_to_pip]
+    if pkgs:
+        print("[pip] faltando:", ", ".join(missing))
+        run_cmd([sys.executable, "-m", "pip", "install", "-q", *pkgs])
+
+    missing = _missing_modules(required)
+    if missing:
+        raise ImportError(
+            "Dependências faltando (mesmo após pip install): "
+            + ", ".join(missing)
+            + "\nGaranta que o notebook está com Internet=ON no Kaggle e rode novamente."
+        )
 
 
 # %%
@@ -527,20 +527,19 @@ for base_cfg in SEG_CONFIGS:
             )
         )
 
-# Ajustes padrão para HF configs quando internet está ON (permite baixar pesos)
-if ALLOW_DOWNLOAD:
-    seg_experiments_all = [
-        SegExperiment(
-            name=e.name,
-            base_config=e.base_config,
-            overrides={
-                **e.overrides,
-                **({"local_files_only": False} if str(read_json(e.base_config).get("backend", "")).lower() in {"dinov2", "hf"} else {}),
-            },
-            include_supplemental=e.include_supplemental,
-        )
-        for e in seg_experiments_all
-    ]
+# Força HF configs a baixarem pesos (internet ON)
+seg_experiments_all = [
+    SegExperiment(
+        name=e.name,
+        base_config=e.base_config,
+        overrides={
+            **e.overrides,
+            **({"local_files_only": False} if str(read_json(e.base_config).get("backend", "")).lower() in {"dinov2", "hf"} else {}),
+        },
+        include_supplemental=e.include_supplemental,
+    )
+    for e in seg_experiments_all
+]
 
 def _select_seg_experiments(experiments: list[SegExperiment], level: str, flt: str) -> list[SegExperiment]:
     level = str(level).strip().lower()
@@ -585,19 +584,19 @@ for cfg_path in CLS_CONFIGS:
         )
     )
 
-if ALLOW_DOWNLOAD:
-    cls_experiments_all = [
-        ClsExperiment(
-            name=e.name,
-            config=e.config,
-            overrides={
-                **e.overrides,
-                **({"local_files_only": False} if str(read_json(e.config).get("backend", "")).lower() in {"dinov2", "hf"} else {}),
-            },
-            include_supplemental=e.include_supplemental,
-        )
-        for e in cls_experiments_all
-    ]
+# Força HF configs a baixarem pesos (internet ON)
+cls_experiments_all = [
+    ClsExperiment(
+        name=e.name,
+        config=e.config,
+        overrides={
+            **e.overrides,
+            **({"local_files_only": False} if str(read_json(e.config).get("backend", "")).lower() in {"dinov2", "hf"} else {}),
+        },
+        include_supplemental=e.include_supplemental,
+    )
+    for e in cls_experiments_all
+]
 
 cls_experiments = [e for e in cls_experiments_all if e.name == CLS_ACTIVE]
 if RUN_CLS_EXPERIMENTS and not cls_experiments:
@@ -954,8 +953,6 @@ def _train_dino_head(exp: DinoHeadExperiment) -> None:
             "--patience",
             str(int(exp.patience)),
         ]
-        if not ALLOW_DOWNLOAD:
-            cmd += ["--local-files-only"]
         if CACHE_ROOT is not None:
             cmd += ["--cache-dir", str(CACHE_ROOT / "hf")]
 
@@ -994,8 +991,6 @@ def _oof_dino(exp: DinoHeadExperiment) -> None:
         cmd += ["--fold", str(FOLD)]
     if int(LIMIT) > 0:
         cmd += ["--limit", str(LIMIT)]
-    if not ALLOW_DOWNLOAD:
-        cmd += ["--local-files-only"]
     if CACHE_ROOT is not None:
         cmd += ["--cache-dir", str(CACHE_ROOT / "hf")]
 

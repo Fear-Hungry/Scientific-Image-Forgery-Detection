@@ -112,15 +112,20 @@ data/
 
 ## Notebooks (Kaggle)
 
-Notebook pronto para uso no Kaggle (internet OFF no submit). Importa o código do projeto em `src/forgeryseg/`.
+Notebooks prontos para uso no Kaggle. A ideia é manter **a lógica em `src/` + `scripts/`** e deixar o notebook apenas como “orquestrador”.
 
-- `notebooks/fase_00_pipeline_unico_kaggle.ipynb`: setup → treino opcional → **gera `submission.csv`** (padrão ON no Kaggle).
+- `notebooks/fase_00_submissao_kaggle.ipynb`: **submissão** (inferência + geração do `submission.csv`, pensado para internet OFF).
+- `notebooks/fase_01_pre_treinamento_kaggle.ipynb`: **pré-treinamento** (internet ON) + empacota checkpoints para reutilizar offline.
+- (Opcional) `notebooks/fase_00_pipeline_unico_kaggle.ipynb`: pipeline “tudo-em-um” (setup → treino opcional → submissão).
 
 Fluxo típico (Kaggle):
 
 1) Anexe o dataset da competição (`recodai-luc-scientific-image-forgery-detection`).
-2) (Opcional) Importe este repositório como Kaggle Dataset (via GitHub) para ter `recodai_bundle/wheels/`, `src/` e `weights_cache/` disponíveis offline (pesos pré-treinados em `.pth`).
-3) Se treinar, os checkpoints ficam em `/kaggle/working/outputs/...`. Para reutilizar, use “Save & Create Dataset” a partir do notebook e anexe o dataset de outputs depois.
+2) Rode `notebooks/fase_01_pre_treinamento_kaggle.ipynb` com **internet ON** (gera `outputs_pretrain.zip`).
+3) Crie/anexe um Kaggle Dataset com a pasta `outputs/` (incluindo `models_seg/` e opcionalmente `models_cls/`).
+4) Rode `notebooks/fase_00_submissao_kaggle.ipynb` com **internet OFF** para gerar `/kaggle/working/submission.csv`.
+
+> Dica (Kaggle CLI): `notebooks/kernel-metadata.json` controla qual notebook é enviado em `code_file`. Para subir kernels diferentes, troque esse campo antes de dar `kaggle kernels push`.
 
 ## Formato de submissão
 

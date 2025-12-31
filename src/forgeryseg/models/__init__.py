@@ -7,4 +7,5 @@ __all__ = [
     "dinov2",
     "ensemble",
     "fpn_convnext",
+    "hybrid",
 ]

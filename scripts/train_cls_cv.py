@@ -203,28 +203,29 @@ def main() -> None:
             drop_last=False,
         )
 
-    build_kwargs: dict[str, object] = {}
-    if backend in {"dinov2", "hf"}:
-        build_kwargs = {
-            "hf_model_id": cfg.get("hf_model_id", model_name),
-            "hf_cache_dir": cfg.get("hf_cache_dir", None),
-            "hf_revision": cfg.get("hf_revision", None),
-            "local_files_only": bool(cfg.get("local_files_only", False)),
-            "freeze_encoder": bool(cfg.get("freeze_encoder", True)),
-            "classifier_hidden": int(cfg.get("classifier_hidden", 0)),
-            "classifier_dropout": float(cfg.get("classifier_dropout", 0.0)),
-            "use_cls_token": bool(cfg.get("use_cls_token", True)),
-            "trust_remote_code": bool(cfg.get("trust_remote_code", False)),
-            "torch_dtype": cfg.get("torch_dtype", None),
-        }
-    elif backend == "timm_encoder":
-        build_kwargs = {
-            "feature_index": int(cfg.get("feature_index", -1)),
-            "pool": cfg.get("pool", "avg"),
-            "classifier_hidden": int(cfg.get("classifier_hidden", 0)),
-            "classifier_dropout": float(cfg.get("classifier_dropout", 0.0)),
-            "freeze_encoder": bool(cfg.get("freeze_encoder", False)),
-        }
+        build_kwargs: dict[str, object] = {}
+        if backend in {"dinov2", "hf"}:
+            build_kwargs = {
+                "hf_model_id": cfg.get("hf_model_id", model_name),
+                "hf_cache_dir": cfg.get("hf_cache_dir", None),
+                "hf_revision": cfg.get("hf_revision", None),
+                "local_files_only": bool(cfg.get("local_files_only", False)),
+                "freeze_encoder": bool(cfg.get("freeze_encoder", True)),
+                "classifier_hidden": int(cfg.get("classifier_hidden", 0)),
+                "classifier_dropout": float(cfg.get("classifier_dropout", 0.0)),
+                "use_cls_token": bool(cfg.get("use_cls_token", True)),
+                "trust_remote_code": bool(cfg.get("trust_remote_code", False)),
+                "torch_dtype": cfg.get("torch_dtype", None),
+            }
+        elif backend == "timm_encoder":
+            build_kwargs = {
+                "feature_index": int(cfg.get("feature_index", -1)),
+                "pool": cfg.get("pool", "avg"),
+                "classifier_hidden": int(cfg.get("classifier_hidden", 0)),
+                "classifier_dropout": float(cfg.get("classifier_dropout", 0.0)),
+                "freeze_encoder": bool(cfg.get("freeze_encoder", False)),
+            }
+
         model = build_classifier(model_name=model_name, pretrained=pretrained, num_classes=1, backend=backend, **build_kwargs).to(device)
 
         pos_weight = torch.tensor(compute_pos_weight(labels[train_idx]), dtype=torch.float32, device=device)

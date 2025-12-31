@@ -7,6 +7,7 @@ from typing import List, Optional, Sequence
 import numpy as np
 
 from .augment import IMAGENET_MEAN, IMAGENET_STD
+from .frequency import compute_fft_mag
 
 
 @dataclass(frozen=True)
@@ -206,6 +207,7 @@ class PatchDataset:
         mean=IMAGENET_MEAN,
         std=IMAGENET_STD,
         normalize: bool = True,
+        use_freq_channels: bool = False,
     ) -> None:
         self.samples = samples
         if isinstance(patch_size, int):
@@ -221,6 +223,7 @@ class PatchDataset:
         self.mean = np.array(mean, dtype=np.float32)
         self.std = np.array(std, dtype=np.float32)
         self.normalize = normalize
+        self.use_freq_channels = use_freq_channels
 
     def __len__(self) -> int:
         return len(self.samples)
@@ -259,15 +262,24 @@ class PatchDataset:
             image = augmented["image"]
             mask = augmented["mask"]
 
-        image = image.astype(np.float32)
-        if image.max() > 1.0:
-            image /= 255.0
+        image = np.asarray(image)
+        image_f = image.astype(np.float32)
+        if float(image_f.max()) > 1.0:
+            image_f = image_f / 255.0
+
+        if self.use_freq_channels:
+            fft_mag = compute_fft_mag(image_f).astype(np.float32)
+
         if self.normalize:
-            image = (image - self.mean) / self.std
-        image = np.transpose(image, (2, 0, 1))
+            image_f = (image_f - self.mean) / self.std
+
+        if self.use_freq_channels:
+            image_f = np.concatenate([image_f, fft_mag], axis=2)
+
+        image_f = np.transpose(image_f, (2, 0, 1))
         mask = mask.astype(np.float32)[None, ...]
 
-        image_tensor = torch.from_numpy(image)
+        image_tensor = torch.from_numpy(image_f)
         mask_tensor = torch.from_numpy(mask)
 
         if self.return_meta:

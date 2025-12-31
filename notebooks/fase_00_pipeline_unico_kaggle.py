@@ -2,1769 +2,646 @@
 # jupyter:
 #   jupytext:
 #     formats: ipynb,py:percent
+#     notebook_metadata_filter: language_info
 #     text_representation:
 #       extension: .py
 #       format_name: percent
 #       format_version: '1.3'
 #       jupytext_version: 1.18.1
+#   kernelspec:
+#     display_name: Python 3
+#     language: python
+#     name: python3
+#   language_info:
+#     codemirror_mode:
+#       name: ipython
+#       version: 3
+#     file_extension: .py
+#     mimetype: text/x-python
+#     name: python
+#     nbconvert_exporter: python
+#     pygments_lexer: ipython3
+#     version: 3.14.2
 # ---
 
 # %% [markdown]
-# # Treino + Submissão — Pipeline Kaggle (Offline)
+# # Pipeline completo — Recod.ai/LUC (Kaggle)
 #
-# Este notebook é focado em **submissão no Kaggle** (internet OFF) e **treina por padrão**:
+# Neste notebook, iremos desenvolver um **pipeline completo** para o desafio
+# **Recod.ai/LUC — Scientific Image Forgery Detection** do Kaggle. O objetivo do
+# desafio é detectar e segmentar regiões manipuladas (*copy-move forgeries*) em
+# imagens científicas biomédicas.
 #
-# 1) **Setup offline + checagens**
-# 2) **Treino** (classificador + segmentadores)
-# 3) **Inferência + `submission.csv`** via `scripts/submit_ensemble.py`
+# O problema envolve duas tarefas principais:
 #
-# ## Regras / Decisões
-# - Importa código do projeto em `src/forgeryseg/` (modularizado).
-# - Compatível com Kaggle **internet OFF** (instala wheels locais se existirem).
-# - Não esconde erros: exceções e tracebacks aparecem.
+# 1) **Classificação binária** — identificar se a imagem contém fraude
+#    (*authentic* vs. *forged*)
+# 2) **Segmentação** — indicar os **pixels exatos** onde há fraude
+#
+# Este pipeline cobre tudo **do treinamento** dos modelos **até a geração do
+# `submission.csv`**, incluindo boas práticas de participantes de alto desempenho:
+# **TTA** (Test Time Augmentation) e **pós-processamento morfológico**.
+#
+# Fluxo do notebook:
+#
+# - **Setup** (paths, cache offline, validações)
+# - **Treino opcional** do classificador
+# - **Treino opcional** do segmentador
+# - **Inferência + pós-processamento** (TTA + morfologia)
+# - **Geração do `submission.csv`**
+
+# %% [markdown]
+# ## 1. Modo Kaggle offline (internet OFF) + setup
+#
+# Para rodar **offline** no Kaggle (modo submissão), este notebook foi pensado
+# para funcionar com:
+#
+# - **Dataset da competição** montado em `/kaggle/input/...` (padrão).
+# - **Este repositório** empacotado como Kaggle Dataset (recomendado).
+# - *(Opcional)* **wheels** locais em `.../recodai_bundle/wheels/` para instalar
+#   dependências que não vêm no ambiente do Kaggle.
+# - *(Opcional)* **cache de pesos** (timm/torch hub e/ou HuggingFace) para usar
+#   modelos/pretrained sem downloads.
+#
+# Variáveis de ambiente úteis (todas opcionais):
+#
+# - `FORGERYSEG_DATA_ROOT`: força o path do dataset (ex.: `/kaggle/input/.../recodai`).
+# - `FORGERYSEG_REPO_ROOT`: força o path do repo (ex.: `/kaggle/input/<ds>/recodai_bundle`).
+# - `FORGERYSEG_WHEELS_ROOT`: força o path dos wheels (ex.: `/kaggle/input/<ds>/recodai_bundle/wheels`).
+# - `FORGERYSEG_CACHE_ROOT`: força o path do cache (ex.: `/kaggle/input/<ds>/recodai_bundle/weights_cache`).
+# - `FORGERYSEG_ALLOW_DOWNLOAD=1`: libera downloads (NÃO use na submissão offline).
+#
+# Dica: para “empacotar” tudo em um Dataset para Kaggle, use `recodai_bundle/`
+# (há pastas `wheels/` e `weights_cache/` prontas).
 #
 # ---
+#
+# ## 2. Instalação de Pacotes (opcional)
+#
+# Nesta seção, instalamos as bibliotecas necessárias e configuramos parâmetros
+# globais (diretórios de dados e *device*). Garantimos uso de GPU quando disponível.
+#
+# Bibliotecas usadas:
+#
+# - **PyTorch**: framework de deep learning.
+# - **Albumentations**: aumentos de dados (imagem + máscara).
+# - **segmentation_models_pytorch (SMP)**: U-Net, U-Net++, DeepLabV3+, etc.
+# - **Transformers (HuggingFace)**: modelos como DINOv2 e SegFormer.
+# - **OpenCV**: operações morfológicas no pós-processamento.
+# - **numpy/pandas**: manipulação de dados.
+#
+# Instalação (se necessário no Kaggle):
+#
+# ```
+# !pip install -q segmentation-models-pytorch==0.3.0 albumentations==1.3.0 transformers==4.34.0 timm==0.9.2
+# ```
 
 # %%
-# Fase 1 — Célula 1: Sanidade Kaggle (lembrete)
-print("Kaggle constraints (lembrete):")
-print("- Runtime <= 4h (CPU/GPU)")
-print("- Internet: OFF no submit")
-print("- Outputs: /kaggle/working/outputs (checkpoints)")
-
-# %%
-# Fase 1 — Célula 2: Imports + ambiente
+import json
 import os
-import random
+import subprocess
 import sys
-import traceback
-import warnings
-from dataclasses import dataclass
 from pathlib import Path
 
-import numpy as np
-import torch
-import torch.nn as nn
 
-warnings.simplefilter("default")
-warnings.filterwarnings("ignore", category=FutureWarning)
-warnings.filterwarnings("ignore", category=ResourceWarning)
-os.environ.setdefault("NO_ALBUMENTATIONS_UPDATE", "1")
-
+# %%
+# Helpers de ambiente
 
 def is_kaggle() -> bool:
     return bool(os.environ.get("KAGGLE_URL_BASE")) or Path("/kaggle").exists()
 
 
-def set_seed(seed: int = 42) -> None:
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
+def env_str(name: str, default: str = "") -> str:
+    value = os.environ.get(name, "")
+    if value == "":
+        return str(default)
+    return str(value)
 
 
-SEED = 42
-set_seed(SEED)
-
-DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-if DEVICE == "cuda":
-    torch.backends.cudnn.benchmark = True
-
-# Em notebooks, multiprocessing pode gerar warnings/instabilidade; use 0 por padrão.
-NUM_WORKERS = int(os.environ.get("FORGERYSEG_NUM_WORKERS", "0"))
-if NUM_WORKERS > 0:
-    print("[WARN] FORGERYSEG_NUM_WORKERS>0 em notebooks pode gerar warnings/instabilidade.")
-print("NUM_WORKERS:", NUM_WORKERS)
-
-print("python:", sys.version.split()[0])
-print("numpy:", np.__version__)
-print("torch:", torch.__version__)
-print("cuda available:", torch.cuda.is_available())
-print("device:", DEVICE)
-
-# %%
-# Fase 1 — Célula 2b: Instalação offline (wheels) — NÃO resolve deps
-#
-# Estruturas suportadas:
-# - `/kaggle/input/<dataset>/wheels/*.whl`
-# - `/kaggle/input/<dataset>/recodai_bundle/wheels/*.whl`
-#
-# Observação: instalamos com `--no-deps` para não tentar instalar dependências do torch offline.
-import subprocess
-
-_install_wheels_env = os.environ.get("FORGERYSEG_INSTALL_WHEELS", "")
-if _install_wheels_env == "":
-    INSTALL_WHEELS = bool(is_kaggle())
-else:
-    INSTALL_WHEELS = _install_wheels_env.strip().lower() in {"1", "true", "yes", "y", "on"}
+def env_bool(name: str, default: bool = False) -> bool:
+    value = os.environ.get(name, "")
+    if value == "":
+        return bool(default)
+    return str(value).strip().lower() in {"1", "true", "yes", "y", "on"}
 
 
-def _find_offline_bundle() -> Path | None:
-    if not is_kaggle():
+def env_path(name: str) -> Path | None:
+    value = env_str(name, "").strip()
+    if not value:
         return None
-    kaggle_input = Path("/kaggle/input")
-    if not kaggle_input.exists():
-        return None
-
-    candidates: list[Path] = []
-    for ds in sorted(kaggle_input.glob("*")):
-        for base in (ds, ds / "recodai_bundle"):
-            if (base / "wheels").exists():
-                candidates.append(base)
-
-    if not candidates:
-        return None
-    if len(candidates) > 1:
-        print("[OFFLINE INSTALL] múltiplos bundles com wheels encontrados; usando o primeiro:")
-        for c in candidates:
-            print(" -", c)
-    return candidates[0]
+    return Path(value)
 
 
-def _candidate_python_roots(base: Path) -> list[Path]:
-    roots = [
-        base,
-        base / "src",
-        base / "vendor",
-        base / "third_party",
-        base / "recodai_bundle",
-        base / "recodai_bundle" / "src",
-        base / "recodai_bundle" / "vendor",
-        base / "recodai_bundle" / "third_party",
+def run_cmd(cmd: list[str], cwd: Path | None = None) -> None:
+    cmd_str = " ".join(str(c) for c in cmd)
+    print("[cmd]", cmd_str)
+    subprocess.run(cmd, check=True, cwd=str(cwd) if cwd else None)
+
+
+def find_repo_root() -> Path | None:
+    here = Path(".").resolve()
+    candidates = [here] + list(here.parents)
+    for cand in candidates:
+        if (cand / "src" / "forgeryseg" / "__init__.py").exists() and (cand / "scripts").exists():
+            return cand
+    if is_kaggle():
+        ki = Path("/kaggle/input")
+        if ki.exists():
+            for ds in sorted(ki.glob("*")):
+                for base in (ds, ds / "recodai_bundle"):
+                    if (base / "src" / "forgeryseg" / "__init__.py").exists():
+                        return base
+    return None
+
+
+def find_data_root() -> Path | None:
+    candidates = [
+        Path("data/recodai"),
+        Path("/kaggle/input/recodai-luc-scientific-image-forgery-detection/recodai"),
+        Path("/kaggle/input/recodai-luc-scientific-image-forgery-detection"),
     ]
-    return [r for r in roots if r.exists()]
+    for cand in candidates:
+        if (cand / "train_images").exists():
+            return cand
+    if is_kaggle():
+        ki = Path("/kaggle/input")
+        if ki.exists():
+            for ds in sorted(ki.glob("*")):
+                if (ds / "train_images").exists():
+                    return ds
+                if (ds / "recodai" / "train_images").exists():
+                    return ds / "recodai"
+    return None
 
 
-def add_local_package_to_syspath(package_dir_name: str) -> list[Path]:
-    """
-    Procura por `package_dir_name/__init__.py` em `/kaggle/input/*` e adiciona o root correspondente ao `sys.path`.
+def find_wheels_root() -> Path | None:
+    explicit = env_path("FORGERYSEG_WHEELS_ROOT")
+    if explicit is not None:
+        return explicit if explicit.exists() else None
 
-    Nota: não excluímos o dataset da competição, pois alguns usuários empacotam o código junto com os dados
-    em um único Kaggle Dataset. A busca é rasa (não percorre imagens), então o custo é baixo.
-    """
-    added: list[Path] = []
-    if not is_kaggle():
-        return added
+    local_candidates = [Path("recodai_bundle") / "wheels", Path("wheels")]
+    for cand in local_candidates:
+        if cand.exists() and any(cand.glob("*.whl")):
+            return cand
 
-    kaggle_input = Path("/kaggle/input")
-    if not kaggle_input.exists():
-        return added
-
-    for ds in sorted(kaggle_input.glob("*")):
-        for root in _candidate_python_roots(ds):
-            pkg = root / package_dir_name
-            if (pkg / "__init__.py").exists():
-                if str(root) not in sys.path:
-                    sys.path.insert(0, str(root))
-                    added.append(root)
-                continue
-            try:
-                for child in sorted(p for p in root.glob("*") if p.is_dir()):
-                    pkg2 = child / package_dir_name
-                    if (pkg2 / "__init__.py").exists():
-                        if str(child) not in sys.path:
-                            sys.path.insert(0, str(child))
-                            added.append(child)
-            except Exception:
-                continue
-
-    if added:
-        uniq = []
-        for p in added:
-            if p not in uniq:
-                uniq.append(p)
-        print(f"[LOCAL IMPORT] adicionado ao sys.path para '{package_dir_name}':")
-        for p in uniq[:10]:
-            print(" -", p)
-        if len(uniq) > 10:
-            print(" ...")
-        return uniq
-
-    print(f"[LOCAL IMPORT] não encontrei '{package_dir_name}/__init__.py' em `/kaggle/input/*`.")
-    return added
+    if is_kaggle():
+        ki = Path("/kaggle/input")
+        if ki.exists():
+            for ds in sorted(ki.glob("*")):
+                for cand in (ds / "wheels", ds / "recodai_bundle" / "wheels"):
+                    if cand.exists() and any(cand.glob("*.whl")):
+                        return cand
+    return None
 
 
-OFFLINE_BUNDLE = _find_offline_bundle()
-if not INSTALL_WHEELS:
-    print("[OFFLINE INSTALL] FORGERYSEG_INSTALL_WHEELS=0; pulando instalação de wheels.")
-elif OFFLINE_BUNDLE is None:
-    print("[OFFLINE INSTALL] nenhum bundle com `wheels/` encontrado em `/kaggle/input`.")
-else:
-    wheel_dir = OFFLINE_BUNDLE / "wheels"
-    whls = sorted(str(p) for p in wheel_dir.glob("*.whl"))
-    print("[OFFLINE INSTALL] bundle:", OFFLINE_BUNDLE)
-    print("[OFFLINE INSTALL] wheels:", len(whls))
-    if not whls:
-        print("[OFFLINE INSTALL] aviso: diretório `wheels/` existe mas não há `.whl`.")
-    else:
-        cmd = [
+def find_cache_root() -> Path | None:
+    explicit = env_path("FORGERYSEG_CACHE_ROOT")
+    if explicit is not None:
+        return explicit if explicit.exists() else None
+
+    local_candidates = [Path("recodai_bundle") / "weights_cache", Path("weights_cache")]
+    for cand in local_candidates:
+        if cand.exists():
+            return cand
+
+    if is_kaggle():
+        ki = Path("/kaggle/input")
+        if ki.exists():
+            for ds in sorted(ki.glob("*")):
+                for cand in (ds / "weights_cache", ds / "recodai_bundle" / "weights_cache"):
+                    if cand.exists():
+                        return cand
+    return None
+
+
+def find_requirements_file() -> Path | None:
+    candidates: list[Path] = []
+    here = Path(".").resolve()
+    for cand in [here] + list(here.parents):
+        candidates.append(cand / "requirements.txt")
+        candidates.append(cand / "recodai_bundle" / "requirements.txt")
+    if is_kaggle():
+        ki = Path("/kaggle/input")
+        if ki.exists():
+            for ds in sorted(ki.glob("*")):
+                candidates.append(ds / "requirements.txt")
+                candidates.append(ds / "recodai_bundle" / "requirements.txt")
+    for cand in candidates:
+        if cand.exists():
+            return cand
+    return None
+
+
+def _missing_modules(mod_names: list[str]) -> list[str]:
+    missing: list[str] = []
+    for name in mod_names:
+        try:
+            __import__(name)
+        except Exception:
+            missing.append(name)
+    return missing
+
+
+def maybe_install_from_wheels(wheels_root: Path | None) -> None:
+    """Try to install only what is missing, using local wheels (offline-safe)."""
+    if wheels_root is None:
+        return
+
+    module_to_pip = {
+        "segmentation_models_pytorch": "segmentation-models-pytorch",
+        "huggingface_hub": "huggingface-hub",
+        "safetensors": "safetensors",
+        "tqdm": "tqdm",
+    }
+    wanted_modules = list(module_to_pip.keys())
+    missing = _missing_modules(wanted_modules)
+    if not missing:
+        print("[wheels] ok (nada a instalar).")
+        return
+
+    packages = [module_to_pip[m] for m in missing if m in module_to_pip]
+    if not packages:
+        return
+
+    print("[wheels] faltando:", ", ".join(missing))
+    print("[wheels] instalando via --no-index/--find-links:", wheels_root)
+    run_cmd(
+        [
             sys.executable,
             "-m",
             "pip",
             "install",
             "--no-index",
             "--find-links",
-            str(wheel_dir),
-            "--no-deps",
-            *whls,
+            str(wheels_root),
+            *packages,
         ]
-        print("[OFFLINE INSTALL] executando:", " ".join(cmd[:9]), "...", f"(+{len(whls)} wheels)")
-        try:
-            subprocess.check_call(cmd)
-            print("[OFFLINE INSTALL] OK.")
-        except Exception:
-            print("[OFFLINE INSTALL] falhou; seguindo sem wheels. Verifique compatibilidade das wheels.")
-            traceback.print_exc()
-
-# %%
-# Fase 1 — Célula 2c: Import do projeto (src/forgeryseg)
-
-def _maybe_add_src_to_syspath(src_root: Path) -> bool:
-    if (src_root / "forgeryseg" / "__init__.py").exists() and str(src_root) not in sys.path:
-        sys.path.insert(0, str(src_root))
-        return True
-    return False
+    )
 
 
-try:
-    import forgeryseg  # type: ignore
-except Exception:
-    _maybe_add_src_to_syspath(Path("src").resolve())
-    if is_kaggle():
-        add_local_package_to_syspath("forgeryseg")
-    import forgeryseg  # type: ignore
-
-FORGERYSEG_FILE = Path(forgeryseg.__file__).resolve()
-print("forgeryseg:", FORGERYSEG_FILE)
-
-PROJECT_ROOT: Path | None = None
-try:
-    if FORGERYSEG_FILE.parent.name == "forgeryseg" and FORGERYSEG_FILE.parent.parent.name == "src":
-        PROJECT_ROOT = FORGERYSEG_FILE.parents[2]
-except Exception:
-    PROJECT_ROOT = None
-print("PROJECT_ROOT:", PROJECT_ROOT)
-
-from torch.utils.data import DataLoader, Dataset  # noqa: E402
-
-from forgeryseg.augment import get_train_augment, get_val_augment  # noqa: E402
-from forgeryseg.dataset import DinoSegDataset, PatchDataset, build_train_index  # noqa: E402
-from forgeryseg.losses import BCETverskyLoss  # noqa: E402
-from forgeryseg.models import builders, dinov2  # noqa: E402
-from forgeryseg.models.classifier import build_classifier, compute_pos_weight  # noqa: E402
-from forgeryseg.offline import configure_cache_dirs  # noqa: E402
-from forgeryseg.train import train_one_epoch, validate  # noqa: E402
-
-# %%
-# Fase 1 — Célula 2d: Cache dirs (offline weights)
-#
-# Para usar pesos pré-treinados no Kaggle com internet OFF, anexe um Dataset contendo caches e aponte aqui.
-# Exemplo de estrutura sugerida:
-# - <CACHE_ROOT>/torch  (TORCH_HOME)
-# - <CACHE_ROOT>/hf     (HF_HOME)
-CACHE_ROOT = os.environ.get("FORGERYSEG_CACHE_ROOT", "")
-if CACHE_ROOT:
-    configure_cache_dirs(CACHE_ROOT)
-    print("[CACHE] FORGERYSEG_CACHE_ROOT:", CACHE_ROOT)
-else:
-    print("[CACHE] FORGERYSEG_CACHE_ROOT vazio (seguindo sem caches).")
-
-# %%
-# Fase 1 — Célula 3: Dataset root + contagens
-
-
-def find_dataset_root() -> Path:
-    def _looks_like_root(p: Path) -> bool:
-        return (p / "train_images").exists() and (p / "test_images").exists()
-
-    if is_kaggle():
-        base = Path("/kaggle/input/recodai-luc-scientific-image-forgery-detection")
-        if _looks_like_root(base):
-            return base
-        kaggle_input = Path("/kaggle/input")
-        if kaggle_input.exists():
-            for ds in sorted(kaggle_input.glob("*")):
-                if _looks_like_root(ds):
-                    return ds
-
-    local_candidates = [
-        Path("data/recodai").resolve(),
-        Path("data").resolve(),
-    ]
-    for cand in local_candidates:
-        if _looks_like_root(cand):
-            return cand
-
-    raise FileNotFoundError("Dataset não encontrado. No Kaggle: anexe o dataset da competição.")
-
-
-DATA_ROOT = find_dataset_root()
-train_samples = build_train_index(DATA_ROOT, strict=False)
-train_labels = np.array([0 if s.is_authentic else 1 for s in train_samples], dtype=np.int64)
-
-print("DATA_ROOT:", DATA_ROOT)
-print("train samples:", len(train_samples), "auth:", int((train_labels == 0).sum()), "forged:", int((train_labels == 1).sum()))
-
-# %%
-# Fase 1 — Célula 4: Config de treino (liga/desliga)
-def _has_any_ckpt(dir_name: str, pattern: str) -> bool:
-    # Procura primeiro em /kaggle/input (datasets anexados), depois em outputs/ local.
+def has_any_ckpt(dir_name: str, pattern: str, outputs_root: Path) -> bool:
     if is_kaggle():
         ki = Path("/kaggle/input")
         if ki.exists():
             for ds in sorted(ki.glob("*")):
                 for base in (ds, ds / "recodai_bundle"):
                     cand = base / "outputs" / dir_name
-                    if cand.exists():
-                        if any(cand.glob(pattern)):
-                            return True
-    local = (Path("/kaggle/working") if is_kaggle() else Path(".").resolve()) / "outputs" / dir_name
-    return local.exists() and any(local.glob(pattern))
+                    if cand.exists() and any(cand.glob(pattern)):
+                        return True
+    cand = outputs_root / dir_name
+    return cand.exists() and any(cand.glob(pattern))
 
 
-HAS_SEG_CKPT = _has_any_ckpt("models_seg", "*/*/best.pt")
-HAS_CLS_CKPT = _has_any_ckpt("models_cls", "fold_*/best.pt")
-
-# Utils
-def _env_bool(name: str, default: bool) -> bool:
-    v = os.environ.get(name, "")
-    if v == "":
-        return bool(default)
-    return str(v).strip().lower() in {"1", "true", "yes", "y", "on"}
-
+def write_config(base_cfg: Path, out_path: Path, overrides: dict) -> Path:
+    with base_cfg.open("r") as f:
+        cfg = json.load(f)
+    cfg.update(overrides)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    with out_path.open("w") as f:
+        json.dump(cfg, f, indent=2)
+    return out_path
 
 
+# %%
+# Config base do notebook (edite via env vars, se quiser)
+KAGGLE = is_kaggle()
+ALLOW_DOWNLOAD = env_bool("FORGERYSEG_ALLOW_DOWNLOAD", default=not KAGGLE)
+OFFLINE = bool(KAGGLE and not ALLOW_DOWNLOAD)
 
-@dataclass(frozen=True)
-class Config:
-    allow_download: bool
-    offline_no_download: bool
-    n_folds: int
-    fold: int
-    fast_train: bool
-    dino_only: bool
-    run_train_cls: bool
-    run_train_seg: bool
-    run_train_dino: bool
+# Instaladores (opcionais)
+RUN_PIP_INSTALL = env_bool("FORGERYSEG_PIP_INSTALL", default=ALLOW_DOWNLOAD)
+INSTALL_WHEELS = env_bool("FORGERYSEG_INSTALL_WHEELS", default=KAGGLE and not ALLOW_DOWNLOAD)
+
+WHEELS_ROOT = find_wheels_root() if INSTALL_WHEELS else None
+if INSTALL_WHEELS:
+    if WHEELS_ROOT is None:
+        print("[wheels] nenhum wheel root encontrado (ok se já tiver as libs no ambiente).")
+    else:
+        maybe_install_from_wheels(WHEELS_ROOT)
+else:
+    print("INSTALL_WHEELS=False (pulando).")
+
+if RUN_PIP_INSTALL:
+    # Atenção: isso usa internet (a menos que você esteja apontando um index local).
+    req_path = find_requirements_file()
+    if req_path is None:
+        raise FileNotFoundError(
+            "RUN_PIP_INSTALL=True, mas não encontrei `requirements.txt`. "
+            "Defina `FORGERYSEG_REPO_ROOT`/mude o cwd, ou desative `FORGERYSEG_PIP_INSTALL`."
+        )
+    run_cmd([sys.executable, "-m", "pip", "install", "-r", str(req_path)])
+else:
+    print("RUN_PIP_INSTALL=False (pulando).")
+
+try:
+    import torch
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print("Dispositivo:", device)
+except Exception as exc:
+    raise RuntimeError("PyTorch não disponível. No Kaggle ele já vem instalado; localmente instale `torch`.") from exc
+
+# Validação rápida de deps críticas (falha cedo, com mensagem clara)
+required_modules = [
+    "numpy",
+    "cv2",
+    "timm",
+    "segmentation_models_pytorch",
+]
+missing = _missing_modules(required_modules)
+if missing:
+    msg = (
+        "Dependências Python faltando: "
+        + ", ".join(missing)
+        + "\n- No Kaggle offline: anexe um Dataset com wheels em `.../recodai_bundle/wheels/` e rode com "
+        + "`FORGERYSEG_INSTALL_WHEELS=1`."
+        + "\n- Alternativa: habilite internet e use `FORGERYSEG_PIP_INSTALL=1` (não serve para submissão offline)."
+    )
+    raise ImportError(msg)
+
+# %%
+# Paths dos dados da competição (Kaggle)
+DATA_ROOT = env_path("FORGERYSEG_DATA_ROOT") or find_data_root() or Path("data/recodai")
+
+if not DATA_ROOT.exists():
+    raise FileNotFoundError(
+        "DATA_ROOT não existe. Defina `FORGERYSEG_DATA_ROOT` ou anexe o dataset do Kaggle."
+        f"\nTentativa: {DATA_ROOT}"
+    )
+
+SAMPLE_SUB_PATH = DATA_ROOT / "sample_submission.csv"
+if SAMPLE_SUB_PATH.exists():
+    try:
+        import pandas as pd
+
+        sample_df = pd.read_csv(SAMPLE_SUB_PATH)
+        print("Colunas do sample submission:", sample_df.columns.tolist())
+        print(sample_df.head(3))
+    except Exception:
+        print("[warn] pandas não disponível para preview do sample_submission.csv (ok).")
+else:
+    print("sample_submission.csv não encontrado (ok fora do Kaggle).")
+
+# %%
+# Fase 0 — Sanidade Kaggle (lembrete)
+print("Kaggle constraints (lembrete):")
+print("- Runtime <= 4h (CPU/GPU)")
+print("- Internet: OFF no submit")
+print("- Outputs: /kaggle/working/outputs (checkpoints)")
 
 
-_allow_download = _env_bool("FORGERYSEG_ALLOW_DOWNLOAD", default=not is_kaggle())
-# No Kaggle, a internet é OFF por padrão. Permita downloads apenas se o usuário pedir explicitamente.
-_offline_no_download = bool(is_kaggle() and not _allow_download)
+# %%
+# Fase 0 — Config (edite esta célula)
+REPO_ROOT = env_path("FORGERYSEG_REPO_ROOT") or find_repo_root() or Path(".").resolve()
+if not (REPO_ROOT / "src" / "forgeryseg" / "__init__.py").exists():
+    raise FileNotFoundError(
+        "Não encontrei o código do repo (src/forgeryseg). "
+        "No Kaggle, anexe um Dataset com `recodai_bundle/` e/ou defina `FORGERYSEG_REPO_ROOT`."
+        f"\nTentativa: {REPO_ROOT}"
+    )
 
-_n_folds = int(os.environ.get("FORGERYSEG_N_FOLDS", "5"))
-_fold = int(os.environ.get("FORGERYSEG_FOLD", "0"))
-_fast_train = _env_bool("FORGERYSEG_FAST_TRAIN", default=bool(is_kaggle() and not HAS_SEG_CKPT))
-_dino_only = _env_bool("FORGERYSEG_DINO_ONLY", default=bool(is_kaggle()))
+# Onde salvar checkpoints e logs
+OUTPUTS_ROOT = Path("/kaggle/working/outputs") if is_kaggle() else REPO_ROOT / "outputs"
+OUTPUTS_ROOT.mkdir(parents=True, exist_ok=True)
 
-# Em notebook de submissão Kaggle, por padrão TREINAMOS.
-_run_train_cls = _env_bool("FORGERYSEG_RUN_TRAIN_CLS", default=not _dino_only)
-_run_train_seg = _env_bool("FORGERYSEG_RUN_TRAIN_SEG", default=not _dino_only)
-_run_train_dino = _env_bool("FORGERYSEG_RUN_TRAIN_DINO", default=bool(_dino_only))
+# Cache offline (opcional). Ex.: /kaggle/input/<dataset>/weights_cache
+CACHE_ROOT = find_cache_root()
 
-CONFIG = Config(
-    allow_download=_allow_download,
-    offline_no_download=_offline_no_download,
-    n_folds=_n_folds,
-    fold=_fold,
-    fast_train=_fast_train,
-    dino_only=_dino_only,
-    run_train_cls=_run_train_cls,
-    run_train_seg=_run_train_seg,
-    run_train_dino=_run_train_dino,
-)
+# Configs base (pode trocar por outras em configs/)
+CLS_CONFIG = REPO_ROOT / "configs" / "cls_effnet_b4.json"
+SEG_CONFIG = REPO_ROOT / "configs" / "seg_unetpp_tu_convnext_small.json"
+INFER_CONFIG = REPO_ROOT / "configs" / "infer_ensemble.json"
 
-ALLOW_DOWNLOAD = bool(CONFIG.allow_download)
-OFFLINE_NO_DOWNLOAD = bool(CONFIG.offline_no_download)
-if OFFLINE_NO_DOWNLOAD:
-    os.environ.setdefault("HF_HUB_OFFLINE", "1")
-    os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
-    print("[OFFLINE] downloads disabled (Kaggle offline).")
+for cfg_path in (CLS_CONFIG, SEG_CONFIG, INFER_CONFIG):
+    if not cfg_path.exists():
+        raise FileNotFoundError(f"Config não encontrado: {cfg_path}")
 
+# CV / folds (FOLD=-1 para treinar todos)
+N_FOLDS = int(os.environ.get("FORGERYSEG_N_FOLDS", "5"))
+FOLD = int(os.environ.get("FORGERYSEG_FOLD", "0"))
 
-N_FOLDS = int(CONFIG.n_folds)
-FOLD = int(CONFIG.fold)
+# Heurística: se já existem checkpoints, não treina (a menos que você force via env)
+HAS_CLS_CKPT = has_any_ckpt("models_cls", "fold_*/best.pt", OUTPUTS_ROOT)
+HAS_SEG_CKPT = has_any_ckpt("models_seg", "*/*/best.pt", OUTPUTS_ROOT)
 
-FAST_TRAIN = bool(CONFIG.fast_train)
+RUN_TRAIN_CLS = env_bool("FORGERYSEG_RUN_TRAIN_CLS", default=not HAS_CLS_CKPT)
+RUN_TRAIN_SEG = env_bool("FORGERYSEG_RUN_TRAIN_SEG", default=not HAS_SEG_CKPT)
+RUN_SUBMISSION = env_bool("FORGERYSEG_RUN_SUBMISSION", default=True)
 
-print("FAST_TRAIN:", FAST_TRAIN)
-print("HAS_SEG_CKPT:", HAS_SEG_CKPT)
+print("REPO_ROOT:", REPO_ROOT)
+print("DATA_ROOT:", DATA_ROOT)
+print("OUTPUTS_ROOT:", OUTPUTS_ROOT)
+print("CACHE_ROOT:", CACHE_ROOT)
 print("HAS_CLS_CKPT:", HAS_CLS_CKPT)
-
-# DINO-only: pipeline simples e 100% offline (sem timm / sem downloads).
-DINO_ONLY = bool(CONFIG.dino_only)
-
-# Em notebook de submissão Kaggle, por padrão TREINAMOS.
-RUN_TRAIN_CLS = bool(CONFIG.run_train_cls)
-RUN_TRAIN_SEG = bool(CONFIG.run_train_seg)
-RUN_TRAIN_DINO = bool(CONFIG.run_train_dino)
-
-print("DINO_ONLY:", DINO_ONLY)
+print("HAS_SEG_CKPT:", HAS_SEG_CKPT)
 print("RUN_TRAIN_CLS:", RUN_TRAIN_CLS)
 print("RUN_TRAIN_SEG:", RUN_TRAIN_SEG)
-print("RUN_TRAIN_DINO:", RUN_TRAIN_DINO)
+print("RUN_SUBMISSION:", RUN_SUBMISSION)
+print("ALLOW_DOWNLOAD:", ALLOW_DOWNLOAD)
+print("RUN_PIP_INSTALL:", RUN_PIP_INSTALL)
+print("INSTALL_WHEELS:", INSTALL_WHEELS)
+print("WHEELS_ROOT:", WHEELS_ROOT)
 print("N_FOLDS:", N_FOLDS)
 print("FOLD:", FOLD)
 
 # %%
-# Fase 2 — Célula 5: Split (folds)
-try:
-    from sklearn.model_selection import StratifiedKFold
+# Fase 0 — Import do projeto + cache offline
+if (REPO_ROOT / "src" / "forgeryseg" / "__init__.py").exists() and str(REPO_ROOT / "src") not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT / "src"))
 
-    skf = StratifiedKFold(n_splits=N_FOLDS, shuffle=True, random_state=SEED)
-    folds = np.zeros(len(train_samples), dtype=np.int64)
-    for fold_id, (_, val_idx) in enumerate(skf.split(np.zeros(len(train_samples)), train_labels)):
-        folds[val_idx] = int(fold_id)
-except Exception:
-    print("[ERRO] scikit-learn falhou (StratifiedKFold). Usando split simples.")
-    traceback.print_exc()
-    folds = np.arange(len(train_samples), dtype=np.int64) % int(N_FOLDS)
+from forgeryseg.dataset import build_supplemental_index, build_test_index, build_train_index
+from forgeryseg.offline import configure_cache_dirs
 
-train_idx = np.where(folds != int(FOLD))[0]
-val_idx = np.where(folds == int(FOLD))[0]
-print(f"fold={FOLD}: train={len(train_idx)} val={len(val_idx)}")
+if CACHE_ROOT is not None:
+    configure_cache_dirs(CACHE_ROOT)
+    print("[CACHE] using", CACHE_ROOT)
 
-# %%
-# Fase 2 — Célula 6: Treino do classificador (opcional)
-try:
-    import torchvision.transforms as T
-except Exception:
-    print("[ERRO] torchvision falhou no import.")
-    traceback.print_exc()
-    raise
-
-try:
-    from tqdm.auto import tqdm
-except Exception:
-    print("[WARN] tqdm indisponível; usando loop simples.")
-
-    def tqdm(x, **kwargs):  # type: ignore
-        return x
-
-
-from forgeryseg.classification import BinaryForgeryClsDataset, build_classification_transform
-
-CLS_MODEL_NAME = "tf_efficientnet_b4_ns"
-CLS_BACKEND = os.environ.get("FORGERYSEG_CLS_BACKEND", "timm").strip().lower()
-CLS_HF_MODEL_ID = os.environ.get("FORGERYSEG_CLS_HF_MODEL_ID", "metaresearch/dinov2")
-CLS_FREEZE_ENCODER = _env_bool("FORGERYSEG_CLS_FREEZE_ENCODER", default=True)
-CLS_LOCAL_FILES_ONLY = _env_bool("FORGERYSEG_CLS_LOCAL_FILES_ONLY", default=OFFLINE_NO_DOWNLOAD)
-CLS_CLASSIFIER_HIDDEN = int(os.environ.get("FORGERYSEG_CLS_HIDDEN", "0"))
-CLS_CLASSIFIER_DROPOUT = float(os.environ.get("FORGERYSEG_CLS_DROPOUT", "0.1"))
-CLS_USE_CLS_TOKEN = _env_bool("FORGERYSEG_CLS_USE_CLS_TOKEN", default=True)
-_cls_default_size = "392" if CLS_BACKEND in {"dinov2", "hf"} else "384"
-CLS_IMAGE_SIZE = int(os.environ.get("FORGERYSEG_CLS_IMAGE_SIZE", _cls_default_size))
-CLS_BATCH_SIZE = 32
-CLS_EPOCHS = int(os.environ.get("FORGERYSEG_CLS_EPOCHS", "15"))
-CLS_PATIENCE = 3
-CLS_LR = 3e-4
-CLS_WEIGHT_DECAY = 1e-2
-# Preferir recall (evitar falsos negativos): só pule a segmentação quando tiver alta confiança de autenticidade.
-CLS_SKIP_THRESHOLD = float(os.environ.get("FORGERYSEG_CLS_SKIP_THRESHOLD", "0.30"))
-# Scheduler (PDF sugere ReduceLROnPlateau ou cosine; usamos ReduceLROnPlateau por padrão).
-CLS_USE_SCHEDULER = _env_bool("FORGERYSEG_CLS_USE_SCHEDULER", default=True)
-CLS_LR_SCHED_PATIENCE = int(os.environ.get("FORGERYSEG_CLS_LR_SCHED_PATIENCE", "2"))
-CLS_LR_SCHED_FACTOR = float(os.environ.get("FORGERYSEG_CLS_LR_SCHED_FACTOR", "0.5"))
-# Pesos pré-treinados ajudam; em Kaggle offline use cache local (falha se faltar).
-CLS_PRETRAINED = _env_bool("FORGERYSEG_CLS_PRETRAINED", default=True)
-
-
-def _build_cls_transform(train: bool):
-    return build_classification_transform(
-        image_size=CLS_IMAGE_SIZE,
-        train=bool(train),
-        p_hflip=0.5,
-        p_vflip=0.5,
-        brightness=0.0,
-        contrast=0.0,
-        grayscale_prob=0.0,
-        blur_prob=0.0,
-        cutout_prob=0.0,
-    )
-
-
-if RUN_TRAIN_CLS and not DINO_ONLY:
-    ds_cls_train = BinaryForgeryClsDataset([train_samples[i] for i in train_idx.tolist()], _build_cls_transform(train=True))
-    ds_cls_val = BinaryForgeryClsDataset([train_samples[i] for i in val_idx.tolist()], _build_cls_transform(train=False))
-
-    num_workers = NUM_WORKERS
-    dl_cls_train = DataLoader(ds_cls_train, batch_size=CLS_BATCH_SIZE, shuffle=True, num_workers=num_workers, pin_memory=(DEVICE == "cuda"), drop_last=True)
-    dl_cls_val = DataLoader(ds_cls_val, batch_size=CLS_BATCH_SIZE, shuffle=False, num_workers=num_workers, pin_memory=(DEVICE == "cuda"), drop_last=False)
-
-    cls_kwargs = {}
-    if CLS_BACKEND in {"dinov2", "hf"}:
-        cls_kwargs = {
-            "hf_model_id": CLS_HF_MODEL_ID,
-            "local_files_only": CLS_LOCAL_FILES_ONLY,
-            "freeze_encoder": CLS_FREEZE_ENCODER,
-            "classifier_hidden": CLS_CLASSIFIER_HIDDEN,
-            "classifier_dropout": CLS_CLASSIFIER_DROPOUT,
-            "use_cls_token": CLS_USE_CLS_TOKEN,
-        }
-    cls_model = build_classifier(
-        model_name=CLS_MODEL_NAME,
-        pretrained=CLS_PRETRAINED,
-        num_classes=1,
-        backend=CLS_BACKEND,
-        **cls_kwargs,
-    ).to(DEVICE)
-    pos_weight = torch.tensor(compute_pos_weight(train_labels[train_idx]), dtype=torch.float32, device=DEVICE)
-    cls_criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
-    cls_optimizer = torch.optim.AdamW(cls_model.parameters(), lr=CLS_LR, weight_decay=CLS_WEIGHT_DECAY)
-    cls_scheduler = None
-    if CLS_USE_SCHEDULER:
-        cls_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-            cls_optimizer,
-            mode="min",
-            patience=int(CLS_LR_SCHED_PATIENCE),
-            factor=float(CLS_LR_SCHED_FACTOR),
-        )
-    cls_scaler = torch.cuda.amp.GradScaler(enabled=(DEVICE == "cuda"))
-
-    @torch.no_grad()
-    def cls_eval() -> dict:
-        cls_model.eval()
-        losses = []
-        logits_all = []
-        y_all = []
-        for x, yb in tqdm(dl_cls_val, desc="cls val", leave=False):
-            x = x.to(DEVICE, non_blocking=True)
-            yb = yb.to(DEVICE, non_blocking=True)
-            logits = cls_model(x).view(-1, 1)
-            loss = cls_criterion(logits, yb)
-            losses.append(float(loss.item()))
-            logits_all.append(logits.detach().cpu().numpy())
-            y_all.append(yb.detach().cpu().numpy())
-        logits_np = np.concatenate(logits_all, axis=0).reshape(-1)
-        y_np = np.concatenate(y_all, axis=0).reshape(-1)
-        probs = 1.0 / (1.0 + np.exp(-logits_np))
-        acc = float(((probs >= 0.5).astype(np.int64) == y_np.astype(np.int64)).mean())
-        out = {"loss": float(np.mean(losses)) if losses else float("nan"), "acc@0.5": acc}
-        try:
-            from sklearn.metrics import roc_auc_score
-
-            out["auc"] = float(roc_auc_score(y_np, probs))
-        except Exception:
-            traceback.print_exc()
-        return out
-
-    def cls_train_one_epoch() -> float:
-        cls_model.train()
-        losses = []
-        for x, yb in tqdm(dl_cls_train, desc="cls train", leave=False):
-            x = x.to(DEVICE, non_blocking=True)
-            yb = yb.to(DEVICE, non_blocking=True)
-            cls_optimizer.zero_grad(set_to_none=True)
-            with torch.cuda.amp.autocast(enabled=(DEVICE == "cuda")):
-                logits = cls_model(x).view(-1, 1)
-                loss = cls_criterion(logits, yb)
-            cls_scaler.scale(loss).backward()
-            cls_scaler.step(cls_optimizer)
-            cls_scaler.update()
-            losses.append(float(loss.item()))
-        return float(np.mean(losses)) if losses else float("nan")
-
-    def output_root() -> Path:
-        return Path("/kaggle/working") if is_kaggle() else Path(".").resolve()
-
-    cls_save_dir = output_root() / "outputs" / "models_cls" / f"fold_{int(FOLD)}"
-    cls_save_dir.mkdir(parents=True, exist_ok=True)
-    cls_best_path = cls_save_dir / "best.pt"
-
-    best_score = -1.0
-    best_epoch = 0
-    for epoch in range(1, int(CLS_EPOCHS) + 1):
-        tr_loss = cls_train_one_epoch()
-        val = cls_eval()
-        if cls_scheduler is not None:
-            cls_scheduler.step(float(val["loss"]))
-        score = float(val.get("auc", -val["loss"]))
-        print(f"[CLS] epoch {epoch:02d}/{CLS_EPOCHS} | train_loss={tr_loss:.4f} | val={val}")
-        if score > best_score:
-            best_score = score
-            best_epoch = int(epoch)
-            ckpt_config = {
-                "backend": CLS_BACKEND,
-                "model_name": CLS_MODEL_NAME,
-                "image_size": int(CLS_IMAGE_SIZE),
-                "pretrained": bool(CLS_PRETRAINED),
-                "fold": int(FOLD),
-                "seed": int(SEED),
-            }
-            if CLS_BACKEND in {"dinov2", "hf"}:
-                ckpt_config.update(
-                    {
-                        "hf_model_id": CLS_HF_MODEL_ID,
-                        "local_files_only": CLS_LOCAL_FILES_ONLY,
-                        "freeze_encoder": CLS_FREEZE_ENCODER,
-                        "classifier_hidden": CLS_CLASSIFIER_HIDDEN,
-                        "classifier_dropout": CLS_CLASSIFIER_DROPOUT,
-                        "use_cls_token": CLS_USE_CLS_TOKEN,
-                    }
-                )
-            ckpt = {
-                "model_state": cls_model.state_dict(),
-                "config": ckpt_config,
-                "score": float(best_score),
-            }
-            torch.save(ckpt, cls_best_path)
-            print("[CLS] saved best ->", cls_best_path)
-        if CLS_PATIENCE and best_epoch and (int(epoch) - int(best_epoch) >= int(CLS_PATIENCE)):
-            print(f"[CLS] early stopping: sem melhora por {CLS_PATIENCE} épocas (best_epoch={best_epoch}).")
-            break
-
-    print("[CLS] done. best score:", best_score)
-else:
-    if DINO_ONLY:
-        print("[CLS] DINO_ONLY=True (pulando treino do classificador).")
-    else:
-        print("[CLS] RUN_TRAIN_CLS=False (pulando).")
+OFFLINE_NO_DOWNLOAD = bool(is_kaggle() and not ALLOW_DOWNLOAD)
+if OFFLINE_NO_DOWNLOAD:
+    os.environ.setdefault("HF_HUB_OFFLINE", "1")
+    os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
+    print("[OFFLINE] downloads disabled (Kaggle submission-safe).")
 
 # %%
-# Fase 3 — Célula 7: Treino de segmentação (opcional)
-SEG_PATCH_SIZE = int(os.environ.get("FORGERYSEG_SEG_PATCH_SIZE", "512"))
-SEG_COPY_MOVE_PROB = 0.20
-SEG_BATCH_SIZE = int(os.environ.get("FORGERYSEG_SEG_BATCH_SIZE", "4"))
-SEG_EPOCHS = int(os.environ.get("FORGERYSEG_SEG_EPOCHS", "40"))
-SEG_LR = 1e-3
-SEG_WEIGHT_DECAY = 1e-2
-SEG_PATIENCE = 3
-# Scheduler (PDF sugere ReduceLROnPlateau ou cosine; usamos ReduceLROnPlateau por padrão).
-SEG_USE_SCHEDULER = _env_bool("FORGERYSEG_SEG_USE_SCHEDULER", default=True)
-SEG_LR_SCHED_PATIENCE = int(os.environ.get("FORGERYSEG_SEG_LR_SCHED_PATIENCE", "2"))
-SEG_LR_SCHED_FACTOR = float(os.environ.get("FORGERYSEG_SEG_LR_SCHED_FACTOR", "0.5"))
-# Pesos pré-treinados: preferível (offline via cache); falha se faltar.
-_seg_weights_env = os.environ.get("FORGERYSEG_SEG_ENCODER_WEIGHTS", "imagenet")
-if str(_seg_weights_env).strip().lower() in {"", "none", "null", "false", "0"}:
-    SEG_ENCODER_WEIGHTS = None
-else:
-    SEG_ENCODER_WEIGHTS = str(_seg_weights_env)
-
-# Para performance máxima, treine mais de uma arquitetura e faça ensemble na inferência.
-# Preset inspirado no PDF "Pipeline Completo..." (Unet++ + DeepLabV3+ + SegFormer).
-SEG_TRAIN_SPECS = [
-    {
-        "model_id": "unetpp_effnet_b7",
-        "arch": "unetplusplus",
-        "encoder_name": "efficientnet-b7",
-    },
-    {
-        "model_id": "deeplabv3p_tu_resnest101e",
-        "arch": "deeplabv3plus",
-        "encoder_name": "tu-resnest101e",
-    },
-    {
-        "model_id": "segformer_mit_b3",
-        "arch": "segformer",
-        "encoder_name": "mit_b3",
-    },
-]
-
-USE_DINOV2 = _env_bool("FORGERYSEG_USE_DINOV2", default=False)
-if USE_DINOV2:
-    SEG_TRAIN_SPECS.append(
-        {
-            "model_id": "dinov2_base_light",
-            "backend": "dinov2",
-            "arch": "dinov2",
-            "hf_model_id": os.environ.get("FORGERYSEG_SEG_HF_MODEL_ID", "metaresearch/dinov2"),
-            "freeze_encoder": _env_bool("FORGERYSEG_SEG_FREEZE_ENCODER", default=True),
-            "decoder_channels": [256, 128, 64],
-            "decoder_dropout": float(os.environ.get("FORGERYSEG_SEG_DECODER_DROPOUT", "0.0")),
-            "local_files_only": OFFLINE_NO_DOWNLOAD,
-        }
-    )
-
-if FAST_TRAIN:
-    print("[SEG] FAST_TRAIN=True -> preset rápido (1 modelo / poucas épocas).")
-    SEG_EPOCHS = min(int(SEG_EPOCHS), 2)
-    if OFFLINE_NO_DOWNLOAD:
-        SEG_TRAIN_SPECS = [
-            {"model_id": "unet_resnet34", "arch": "unet", "encoder_name": "resnet34", "encoder_weights": None},
-        ]
-    else:
-        SEG_TRAIN_SPECS = [
-            {"model_id": "unet_tu_convnext_small", "arch": "unet", "encoder_name": "tu-convnext_small"},
-        ]
-
-if RUN_TRAIN_SEG and not DINO_ONLY:
-    train_aug = get_train_augment(patch_size=SEG_PATCH_SIZE, copy_move_prob=SEG_COPY_MOVE_PROB)
-    val_aug = get_val_augment()
-
-    ds_seg_train = PatchDataset([train_samples[i] for i in train_idx.tolist()], patch_size=SEG_PATCH_SIZE, train=True, augment=train_aug, positive_prob=0.7, seed=SEED)
-    ds_seg_val = PatchDataset([train_samples[i] for i in val_idx.tolist()], patch_size=SEG_PATCH_SIZE, train=False, augment=val_aug, seed=SEED)
-
-    num_workers = NUM_WORKERS
-    dl_seg_train = DataLoader(ds_seg_train, batch_size=SEG_BATCH_SIZE, shuffle=True, num_workers=num_workers, pin_memory=(DEVICE == "cuda"), drop_last=True)
-    dl_seg_val = DataLoader(ds_seg_val, batch_size=SEG_BATCH_SIZE, shuffle=False, num_workers=num_workers, pin_memory=(DEVICE == "cuda"), drop_last=False)
-
-    def output_root() -> Path:
-        return Path("/kaggle/working") if is_kaggle() else Path(".").resolve()
-
-    use_amp = (DEVICE == "cuda")
-
-    def build_seg_model(spec: dict, encoder_weights: str | None) -> nn.Module:
-        backend = str(spec.get("backend", "smp")).lower()
-        if backend == "smp":
-            arch = str(spec.get("arch", "unet")).lower()
-            encoder_name = str(spec.get("encoder_name", "efficientnet-b4"))
-            if arch == "unet":
-                return builders.build_unet(
-                    encoder_name=encoder_name,
-                    encoder_weights=encoder_weights,
-                    classes=1,
-                    strict_weights=True,
-                )
-            if arch in {"unetplusplus", "unetpp"}:
-                return builders.build_unetplusplus(
-                    encoder_name=encoder_name,
-                    encoder_weights=encoder_weights,
-                    classes=1,
-                    strict_weights=True,
-                )
-            if arch in {"deeplabv3plus", "deeplabv3+", "deeplabv3p"}:
-                return builders.build_deeplabv3plus(
-                    encoder_name=encoder_name,
-                    encoder_weights=encoder_weights,
-                    classes=1,
-                    strict_weights=True,
-                )
-            if arch in {"segformer", "mit"}:
-                return builders.build_segformer(
-                    encoder_name=encoder_name,
-                    encoder_weights=encoder_weights,
-                    classes=1,
-                    strict_weights=True,
-                )
-            raise ValueError(f"SEG arch inválida: {arch!r}")
-
-        if backend in {"dinov2", "hf"}:
-            model_id = str(spec.get("hf_model_id", "metaresearch/dinov2"))
-            return dinov2.build_dinov2_segmenter(
-                model_id=model_id,
-                decoder_channels=spec.get("decoder_channels", (256, 128, 64)),
-                decoder_dropout=float(spec.get("decoder_dropout", 0.0)),
-                pretrained=True,
-                freeze_encoder=bool(spec.get("freeze_encoder", True)),
-                local_files_only=bool(spec.get("local_files_only", OFFLINE_NO_DOWNLOAD)),
-            )
-
-        raise ValueError(f"SEG backend inválido: {backend!r}")
-
-    available_encoders = set(builders.available_encoders())
-
-    for spec in SEG_TRAIN_SPECS:
-        model_id = str(spec["model_id"])
-        backend = str(spec.get("backend", "smp")).lower()
-        arch = str(spec.get("arch", "unetplusplus"))
-        encoder_name = str(spec.get("encoder_name", spec.get("hf_model_id", "efficientnet-b4")))
-        encoder_weights: str | None = spec.get("encoder_weights", SEG_ENCODER_WEIGHTS)
-
-        if backend == "smp" and available_encoders and encoder_name not in available_encoders:
-            raise ValueError(f"[SEG] encoder {encoder_name!r} não listado em SMP.")
-
-        seg_model = build_seg_model(spec, encoder_weights).to(DEVICE)
-
-        seg_criterion = BCETverskyLoss(alpha=0.7, beta=0.3, tversky_weight=1.0)
-        seg_optimizer = torch.optim.AdamW(seg_model.parameters(), lr=SEG_LR, weight_decay=SEG_WEIGHT_DECAY)
-        seg_scheduler = None
-        if SEG_USE_SCHEDULER:
-            seg_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-                seg_optimizer,
-                mode="min",
-                patience=int(SEG_LR_SCHED_PATIENCE),
-                factor=float(SEG_LR_SCHED_FACTOR),
-            )
-
-        seg_save_dir = output_root() / "outputs" / "models_seg" / model_id / f"fold_{int(FOLD)}"
-        seg_save_dir.mkdir(parents=True, exist_ok=True)
-        seg_best_path = seg_save_dir / "best.pt"
-
-        best_dice = -1.0
-        best_epoch = 0
-        for epoch in range(1, int(SEG_EPOCHS) + 1):
-            tr = train_one_epoch(seg_model, dl_seg_train, seg_criterion, seg_optimizer, DEVICE, use_amp=use_amp, progress=True, desc=f"seg train ({model_id})")
-            val_stats, val_dice = validate(seg_model, dl_seg_val, seg_criterion, DEVICE, progress=True, desc=f"seg val ({model_id})")
-            if seg_scheduler is not None:
-                seg_scheduler.step(float(val_stats.loss))
-            print(f"[SEG {model_id}] epoch {epoch:02d}/{SEG_EPOCHS} | train_loss={tr.loss:.4f} | val_loss={val_stats.loss:.4f} | dice@0.5={val_dice:.4f}")
-            if float(val_dice) > best_dice:
-                best_dice = float(val_dice)
-                best_epoch = int(epoch)
-                ckpt_config = {
-                    "backend": backend,
-                    "arch": arch,
-                    "encoder_name": encoder_name,
-                    "encoder_weights": encoder_weights,
-                    "classes": 1,
-                    "model_id": model_id,
-                    "patch_size": int(SEG_PATCH_SIZE),
-                    "fold": int(FOLD),
-                    "seed": int(SEED),
-                }
-                if backend in {"dinov2", "hf"}:
-                    ckpt_config.update(
-                        {
-                            "hf_model_id": spec.get("hf_model_id", encoder_name),
-                            "freeze_encoder": bool(spec.get("freeze_encoder", True)),
-                            "decoder_channels": spec.get("decoder_channels", (256, 128, 64)),
-                            "decoder_dropout": float(spec.get("decoder_dropout", 0.0)),
-                            "local_files_only": bool(spec.get("local_files_only", OFFLINE_NO_DOWNLOAD)),
-                        }
-                    )
-                ckpt = {
-                    "model_state": seg_model.state_dict(),
-                    "config": ckpt_config,
-                    "score": float(best_dice),
-                }
-                torch.save(ckpt, seg_best_path)
-                print("[SEG] saved best ->", seg_best_path)
-            if SEG_PATIENCE and best_epoch and (int(epoch) - int(best_epoch) >= int(SEG_PATIENCE)):
-                print(f"[SEG {model_id}] early stopping: sem melhora por {SEG_PATIENCE} épocas (best_epoch={best_epoch}).")
-                break
-
-        print(f"[SEG {model_id}] done. best dice:", best_dice)
-else:
-    if DINO_ONLY:
-        print("[SEG] DINO_ONLY=True (pulando treino SMP/SegFormer).")
-    else:
-        print("[SEG] RUN_TRAIN_SEG=False (pulando).")
-
-# %% [markdown]
-# ## Fase 3b — DINOv2 (offline) + head leve + TTA + pós-processamento
-#
-# Pipeline simples e robusto para Kaggle offline:
-# - Encoder DINOv2 (congelado, pesos locais)
-# - Head conv leve (3 camadas)
-# - TTA + pós-processamento adaptativo
-#
-# Para ativar: `FORGERYSEG_DINO_ONLY=1` (default no Kaggle).
-
-# %%
-if DINO_ONLY:
-    try:
-        import cv2
-    except Exception:
-        print("[ERRO] OpenCV (cv2) não disponível. Instale ou inclua no bundle.")
-        raise
-    try:
-        from PIL import Image
-    except Exception:
-        print("[ERRO] Pillow (PIL) não disponível. Inclua no bundle offline.")
-        raise
-
-    def _parse_version_tuple(ver: str) -> tuple[int, ...]:
-        parts = []
-        for chunk in str(ver).replace("+", ".").split("."):
-            try:
-                parts.append(int(chunk))
-            except Exception:
-                break
-        return tuple(parts)
-
-    def _ensure_hf_hub_compat() -> None:
-        try:
-            from importlib import metadata as importlib_metadata
-        except Exception:
-            import importlib_metadata  # type: ignore
-
-        try:
-            hub_ver = importlib_metadata.version("huggingface-hub")
-        except Exception:
-            hub_ver = None
-
-        def _is_ok(v: str | None) -> bool:
-            if not v:
-                return False
-            vt = _parse_version_tuple(v)
-            return vt >= (0, 34, 0) and vt < (1, 0, 0)
-
-        if _is_ok(hub_ver):
-            return
-
-        print(f"[DINO] huggingface-hub incompatível (versão atual={hub_ver}). Tentando instalar wheel offline (<1.0).")
-        if OFFLINE_BUNDLE is None:
-            raise RuntimeError("[DINO] bundle offline não encontrado; adicione wheels de huggingface-hub 0.34.x.")
-
-        wheel_dir = OFFLINE_BUNDLE / "wheels"
-        if not wheel_dir.exists():
-            raise RuntimeError(f"[DINO] diretório de wheels não encontrado: {wheel_dir}")
-
-        hub_wheels = sorted(wheel_dir.glob("huggingface_hub-*.whl"))
-        if not hub_wheels:
-            raise RuntimeError("[DINO] wheel de huggingface-hub não encontrada. Inclua huggingface-hub==0.34.* no bundle.")
-
-        # escolher a wheel mais alta <1.0
-        def _wheel_version(p: Path) -> tuple[int, ...]:
-            name = p.name.replace("huggingface_hub-", "")
-            ver = name.split("-")[0]
-            return _parse_version_tuple(ver)
-
-        candidates = [(p, _wheel_version(p)) for p in hub_wheels]
-        candidates = [c for c in candidates if c[1] >= (0, 34, 0) and c[1] < (1, 0, 0)]
-        if not candidates:
-            raise RuntimeError("[DINO] nenhuma wheel compatível de huggingface-hub (<1.0) encontrada no bundle.")
-
-        candidates.sort(key=lambda x: x[1], reverse=True)
-        wheel_path = candidates[0][0]
-        cmd = [
-            sys.executable,
-            "-m",
-            "pip",
-            "install",
-            "--no-index",
-            "--find-links",
-            str(wheel_dir),
-            "--no-deps",
-            str(wheel_path),
-        ]
-        print("[DINO] instalando:", " ".join(cmd))
-        subprocess.check_call(cmd)
-
-        try:
-            hub_ver = importlib_metadata.version("huggingface-hub")
-        except Exception:
-            hub_ver = None
-        if not _is_ok(hub_ver):
-            raise RuntimeError(f"[DINO] huggingface-hub ainda incompatível após instalação (versão={hub_ver}).")
-        print("[DINO] huggingface-hub OK:", hub_ver)
-
-    _ensure_hf_hub_compat()
-
-    try:
-        import transformers  # noqa: F401
-    except Exception:
-        print("[ERRO] transformers não disponível. Inclua no bundle offline.")
-        raise
-
-    DINO_PATH = os.environ.get("FORGERYSEG_DINO_PATH", "/kaggle/input/dinov2/pytorch/base/1")
-    DINO_IMAGE_SIZE = int(os.environ.get("FORGERYSEG_DINO_IMAGE_SIZE", "512"))
-    DINO_BATCH_SIZE = int(os.environ.get("FORGERYSEG_DINO_BATCH_SIZE", "4"))
-    DINO_EPOCHS = int(os.environ.get("FORGERYSEG_DINO_EPOCHS", "5"))
-    DINO_LR = float(os.environ.get("FORGERYSEG_DINO_LR", "3e-4"))
-    DINO_WEIGHT_DECAY = float(os.environ.get("FORGERYSEG_DINO_WEIGHT_DECAY", "1e-2"))
-    DINO_LOCAL_FILES_ONLY = _env_bool("FORGERYSEG_DINO_LOCAL_ONLY", default=True)
-    DINO_DECODER_DROPOUT = float(os.environ.get("FORGERYSEG_DINO_DECODER_DROPOUT", "0.0"))
-    DINO_SAVE_DIR = (Path("/kaggle/working") if is_kaggle() else Path(".").resolve()) / "outputs" / "models_dino"
-    DINO_SAVE_DIR.mkdir(parents=True, exist_ok=True)
-    DINO_CKPT_PATH = DINO_SAVE_DIR / "best.pt"
-
-    # Pós-processamento (adaptativo)
-    DINO_THR_FACTOR = float(os.environ.get("FORGERYSEG_DINO_THR_FACTOR", "0.3"))
-    DINO_MIN_AREA = int(os.environ.get("FORGERYSEG_DINO_MIN_AREA", "30"))
-    DINO_MIN_AREA_PERCENT = float(os.environ.get("FORGERYSEG_DINO_MIN_AREA_PERCENT", "0.0005"))
-    DINO_MIN_CONFIDENCE = float(os.environ.get("FORGERYSEG_DINO_MIN_CONFIDENCE", "0.33"))
-    DINO_MORPH_CLOSE_K = int(os.environ.get("FORGERYSEG_DINO_CLOSE_K", "5"))
-    DINO_MORPH_OPEN_K = int(os.environ.get("FORGERYSEG_DINO_OPEN_K", "3"))
-    DINO_MORPH_ITERS = int(os.environ.get("FORGERYSEG_DINO_MORPH_ITERS", "1"))
-    DINO_USE_TTA = _env_bool("FORGERYSEG_DINO_TTA", default=True)
-    DINO_USE_INSTANCES = _env_bool("FORGERYSEG_DINO_USE_INSTANCES", default=True)
-    DINO_ADAPTIVE_THRESHOLD = _env_bool("FORGERYSEG_DINO_ADAPTIVE_THR", default=True)
-    DINO_THRESHOLD = float(os.environ.get("FORGERYSEG_DINO_THRESHOLD", "0.5"))
-    DINO_MORPH_CLOSE_ITERS = int(os.environ.get("FORGERYSEG_DINO_CLOSE_ITERS", str(DINO_MORPH_ITERS)))
-    DINO_MORPH_OPEN_ITERS = int(os.environ.get("FORGERYSEG_DINO_OPEN_ITERS", str(DINO_MORPH_ITERS)))
-    DINO_BEST_CONFIG = os.environ.get("FORGERYSEG_DINO_BEST_CONFIG", "outputs/dino_thresholds.json")
-
-    print("DINO_PATH:", DINO_PATH)
-    print("DINO_IMAGE_SIZE:", DINO_IMAGE_SIZE)
-    print("DINO_BATCH_SIZE:", DINO_BATCH_SIZE)
-    print("DINO_EPOCHS:", DINO_EPOCHS)
-    print("DINO_THR_FACTOR:", DINO_THR_FACTOR)
-    print("DINO_MIN_AREA:", DINO_MIN_AREA, "DINO_MIN_AREA_PERCENT:", DINO_MIN_AREA_PERCENT)
-    print("DINO_MIN_CONFIDENCE:", DINO_MIN_CONFIDENCE)
-    print("DINO_USE_TTA:", DINO_USE_TTA)
-    print("DINO_USE_INSTANCES:", DINO_USE_INSTANCES)
-    print("DINO_MORPH_CLOSE_ITERS:", DINO_MORPH_CLOSE_ITERS, "DINO_MORPH_OPEN_ITERS:", DINO_MORPH_OPEN_ITERS)
-
-    if str(DINO_PATH).startswith("/") and not Path(DINO_PATH).exists():
-        raise FileNotFoundError(f"[DINO] caminho não encontrado: {DINO_PATH}")
-
-    # Reutiliza implementação modularizada em `src/forgeryseg` (evita redefinição no notebook):
-    # - Modelo: `forgeryseg.models.dinov2.DinoSeg`
-    # - Dataset: `forgeryseg.dataset.DinoSegDataset`
-
-    def _dice_from_logits(logits: torch.Tensor, targets: torch.Tensor, thr: float = 0.5, eps: float = 1e-6) -> float:
-        probs = torch.sigmoid(logits)
-        preds = (probs > thr).float()
-        inter = (preds * targets).sum(dim=(2, 3))
-        union = preds.sum(dim=(2, 3)) + targets.sum(dim=(2, 3))
-        dice = (2.0 * inter + eps) / (union + eps)
-        return float(dice.mean().item())
-
-    def _adaptive_threshold_value(prob: np.ndarray, factor: float = 0.3, eps: float = 1e-6) -> float:
-        mean = float(np.mean(prob))
-        std = float(np.std(prob))
-        thr = mean + float(factor) * std
-        thr = max(float(eps), min(1.0 - float(eps), thr))
-        return float(thr)
-
-    def _remove_small_components(mask: np.ndarray, min_area: int) -> np.ndarray:
-        if int(min_area) <= 0:
-            return mask
-        num, labels, stats, _ = cv2.connectedComponentsWithStats(mask.astype(np.uint8), connectivity=8)
-        if num <= 1:
-            return mask
-        out = np.zeros_like(mask, dtype=np.uint8)
-        for idx in range(1, num):
-            area = stats[idx, cv2.CC_STAT_AREA]
-            if int(area) >= int(min_area):
-                out[labels == idx] = 1
-        return out
-
-    # Carregar melhor config (se existir) para usar na submissão
-    try:
-        _best_cfg_path = Path(DINO_BEST_CONFIG)
-        if _best_cfg_path.exists():
-            import json as _json
-
-            _best_cfg = _json.loads(_best_cfg_path.read_text())
-            DINO_ADAPTIVE_THRESHOLD = bool(_best_cfg.get("adaptive_threshold", DINO_ADAPTIVE_THRESHOLD))
-            if DINO_ADAPTIVE_THRESHOLD:
-                DINO_THR_FACTOR = float(_best_cfg.get("threshold_factor", DINO_THR_FACTOR))
-            else:
-                if _best_cfg.get("threshold") is not None:
-                    DINO_THRESHOLD = float(_best_cfg.get("threshold", DINO_THRESHOLD))
-            if _best_cfg.get("min_area") is not None:
-                DINO_MIN_AREA = int(_best_cfg.get("min_area", DINO_MIN_AREA))
-            if _best_cfg.get("min_area_percent") is not None:
-                DINO_MIN_AREA_PERCENT = float(_best_cfg.get("min_area_percent", DINO_MIN_AREA_PERCENT))
-            if _best_cfg.get("min_confidence") is not None:
-                DINO_MIN_CONFIDENCE = float(_best_cfg.get("min_confidence", DINO_MIN_CONFIDENCE))
-            if _best_cfg.get("closing") is not None:
-                DINO_MORPH_CLOSE_K = int(_best_cfg.get("closing", DINO_MORPH_CLOSE_K))
-            if _best_cfg.get("opening") is not None:
-                DINO_MORPH_OPEN_K = int(_best_cfg.get("opening", DINO_MORPH_OPEN_K))
-            if _best_cfg.get("closing_iters") is not None:
-                DINO_MORPH_CLOSE_ITERS = int(_best_cfg.get("closing_iters", DINO_MORPH_CLOSE_ITERS))
-            if _best_cfg.get("opening_iters") is not None:
-                DINO_MORPH_OPEN_ITERS = int(_best_cfg.get("opening_iters", DINO_MORPH_OPEN_ITERS))
-            DINO_MORPH_ITERS = max(int(DINO_MORPH_CLOSE_ITERS), int(DINO_MORPH_OPEN_ITERS))
-            print("[DINO] best config loaded:", _best_cfg_path)
-    except Exception:
-        print("[DINO] falha ao carregar best config; seguindo com defaults.")
-        traceback.print_exc()
-
-    def _postprocess_prob(prob: np.ndarray) -> np.ndarray:
-        if DINO_ADAPTIVE_THRESHOLD:
-            thr = _adaptive_threshold_value(prob, factor=DINO_THR_FACTOR)
-        else:
-            thr = float(DINO_THRESHOLD)
-        mask = (prob >= thr).astype(np.uint8)
-
-        if DINO_MORPH_CLOSE_K > 0:
-            kernel = np.ones((DINO_MORPH_CLOSE_K, DINO_MORPH_CLOSE_K), np.uint8)
-            mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=int(DINO_MORPH_CLOSE_ITERS))
-        if DINO_MORPH_OPEN_K > 0:
-            kernel = np.ones((DINO_MORPH_OPEN_K, DINO_MORPH_OPEN_K), np.uint8)
-            mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=int(DINO_MORPH_OPEN_ITERS))
-
-        min_area = int(DINO_MIN_AREA)
-        if float(DINO_MIN_AREA_PERCENT) > 0:
-            min_area = max(min_area, int(float(DINO_MIN_AREA_PERCENT) * float(mask.size)))
-        mask = _remove_small_components(mask, min_area=min_area)
-
-        if int(mask.sum()) <= 0:
-            return mask
-
-        if float(DINO_MIN_CONFIDENCE) > 0:
-            conf = float(prob[mask > 0].mean())
-            if conf < float(DINO_MIN_CONFIDENCE):
-                return np.zeros_like(mask, dtype=np.uint8)
-        return mask
-
-    dino_model = None
-    if RUN_TRAIN_DINO:
-        ds_dino_train = DinoSegDataset([train_samples[i] for i in train_idx.tolist()], DINO_IMAGE_SIZE, train=True)
-        ds_dino_val = DinoSegDataset([train_samples[i] for i in val_idx.tolist()], DINO_IMAGE_SIZE, train=False)
-        dl_dino_train = DataLoader(ds_dino_train, batch_size=DINO_BATCH_SIZE, shuffle=True, num_workers=NUM_WORKERS, pin_memory=(DEVICE == "cuda"), drop_last=True)
-        dl_dino_val = DataLoader(ds_dino_val, batch_size=DINO_BATCH_SIZE, shuffle=False, num_workers=NUM_WORKERS, pin_memory=(DEVICE == "cuda"), drop_last=False)
-
-        dino_model = dinov2.DinoSeg(
-            DINO_PATH,
-            decoder_dropout=DINO_DECODER_DROPOUT,
-            local_files_only=DINO_LOCAL_FILES_ONLY,
-        ).to(DEVICE)
-        dino_optimizer = torch.optim.AdamW(dino_model.head.parameters(), lr=DINO_LR, weight_decay=DINO_WEIGHT_DECAY)
-        dino_loss = nn.BCEWithLogitsLoss()
-        dino_scaler = torch.cuda.amp.GradScaler(enabled=(DEVICE == "cuda"))
-
-        best_dice = -1.0
-        best_epoch = 0
-        for epoch in range(1, int(DINO_EPOCHS) + 1):
-            dino_model.train()
-            tr_losses = []
-            for xb, yb in tqdm(dl_dino_train, desc="dino train", leave=False):
-                xb = xb.to(DEVICE, non_blocking=True)
-                yb = yb.to(DEVICE, non_blocking=True)
-                dino_optimizer.zero_grad(set_to_none=True)
-                with torch.cuda.amp.autocast(enabled=(DEVICE == "cuda")):
-                    logits = dino_model(xb)
-                    loss = dino_loss(logits, yb)
-                dino_scaler.scale(loss).backward()
-                dino_scaler.step(dino_optimizer)
-                dino_scaler.update()
-                tr_losses.append(float(loss.item()))
-
-            dino_model.eval()
-            val_dices = []
-            with torch.no_grad():
-                for xb, yb in tqdm(dl_dino_val, desc="dino val", leave=False):
-                    xb = xb.to(DEVICE, non_blocking=True)
-                    yb = yb.to(DEVICE, non_blocking=True)
-                    logits = dino_model(xb)
-                    val_dices.append(_dice_from_logits(logits, yb))
-            mean_dice = float(np.mean(val_dices)) if val_dices else float("nan")
-            print(f"[DINO] epoch {epoch:02d}/{DINO_EPOCHS} | train_loss={np.mean(tr_losses):.4f} | dice@0.5={mean_dice:.4f}")
-            if float(mean_dice) > best_dice:
-                best_dice = float(mean_dice)
-                best_epoch = int(epoch)
-                ckpt = {
-                    "head_state": dino_model.head.state_dict(),
-                    "config": {
-                        "dino_path": str(DINO_PATH),
-                        "image_size": int(DINO_IMAGE_SIZE),
-                        "thr_factor": float(DINO_THR_FACTOR),
-                        "min_area": int(DINO_MIN_AREA),
-                        "min_area_percent": float(DINO_MIN_AREA_PERCENT),
-                        "min_confidence": float(DINO_MIN_CONFIDENCE),
-                    },
-                    "score": float(best_dice),
-                }
-                torch.save(ckpt, DINO_CKPT_PATH)
-                print("[DINO] saved best ->", DINO_CKPT_PATH)
-            if best_epoch and (int(epoch) - int(best_epoch) >= 3):
-                print("[DINO] early stopping: sem melhora por 3 épocas.")
-                break
-
-        print("[DINO] done. best dice:", best_dice)
-    else:
-        print("[DINO] RUN_TRAIN_DINO=False (pulando treino).")
-
-    if dino_model is None:
-        if not DINO_CKPT_PATH.exists():
-            raise FileNotFoundError(f"[DINO] checkpoint não encontrado: {DINO_CKPT_PATH}")
-        dino_model = dinov2.DinoSeg(
-            DINO_PATH,
-            decoder_dropout=DINO_DECODER_DROPOUT,
-            local_files_only=DINO_LOCAL_FILES_ONLY,
-        ).to(DEVICE)
-        ckpt = torch.load(DINO_CKPT_PATH, map_location=DEVICE)
-        dino_model.head.load_state_dict(ckpt["head_state"])
-        dino_model.eval()
-        print("[DINO] carregado checkpoint ->", DINO_CKPT_PATH)
-
-# %%
-# Fase 3c — OOF + tuning (opcional, local)
-#
-# Habilite para rodar tudo dentro do notebook (CPU ok, pode demorar).
-# - FORGERYSEG_DINO_OOF=1 -> gera preds + score em runs/
-# - FORGERYSEG_DINO_OOF_TRAIN=1 -> treina head por fold antes do OOF
-# - FORGERYSEG_DINO_TUNE=1 -> faz grid search de pós-processamento
-# - FORGERYSEG_DINO_TUNE_APPLY=1 -> aplica os melhores parâmetros no próprio notebook
-
-if DINO_ONLY:
-    _default_oof = True
-    RUN_DINO_OOF = _env_bool("FORGERYSEG_DINO_OOF", default=_default_oof)
-    RUN_DINO_OOF_TRAIN = _env_bool("FORGERYSEG_DINO_OOF_TRAIN", default=_default_oof)
-    RUN_DINO_TUNE = _env_bool("FORGERYSEG_DINO_TUNE", default=_default_oof)
-
-    if RUN_DINO_OOF or RUN_DINO_TUNE:
-        from forgeryseg.dino_oof import predict_dino_oof, train_dino_head, tune_dino_thresholds
-
-        def _parse_int_list(text: str, default: list[int]) -> list[int]:
-            txt = str(text).strip()
-            if not txt:
-                return default
-            return [int(x) for x in txt.split(",") if x.strip()]
-
-        def _parse_float_list(text: str, default: list[float]) -> list[float]:
-            txt = str(text).strip()
-            if not txt:
-                return default
-            return [float(x) for x in txt.split(",") if x.strip()]
-
-        DINO_OOF_FOLDS = int(os.environ.get("FORGERYSEG_DINO_OOF_FOLDS", str(N_FOLDS)))
-        DINO_OOF_PRED_ROOT = os.environ.get("FORGERYSEG_DINO_OOF_PREDS", "outputs/preds_dino")
-        DINO_OOF_MODEL_DIR = os.environ.get("FORGERYSEG_DINO_OOF_MODEL_DIR", "outputs/models_dino")
-        DINO_OOF_TTA = os.environ.get("FORGERYSEG_DINO_OOF_TTA", "none,hflip,vflip,rot90,rot180,rot270")
-        DINO_OOF_LIMIT = int(os.environ.get("FORGERYSEG_DINO_OOF_LIMIT", "0"))
-        dino_oof_result = None
-
-        if RUN_DINO_OOF_TRAIN:
-            for _fold in range(int(DINO_OOF_FOLDS)):
-                print(f"[DINO OOF] training fold {_fold}/{DINO_OOF_FOLDS - 1} ...")
-                train_dino_head(
-                    data_root=DATA_ROOT,
-                    output_dir=DINO_OOF_MODEL_DIR,
-                    folds=int(DINO_OOF_FOLDS),
-                    fold=int(_fold),
-                    seed=int(SEED),
-                    dino_path=str(DINO_PATH),
-                    image_size=int(DINO_IMAGE_SIZE),
-                    batch_size=int(DINO_BATCH_SIZE),
-                    epochs=int(DINO_EPOCHS),
-                    lr=float(DINO_LR),
-                    weight_decay=float(DINO_WEIGHT_DECAY),
-                    decoder_dropout=float(DINO_DECODER_DROPOUT),
-                    patience=3,
-                    device=DEVICE,
-                    num_workers=int(NUM_WORKERS),
-                    local_files_only=bool(DINO_LOCAL_FILES_ONLY),
-                )
-
-        if RUN_DINO_OOF:
-            dino_oof_result = predict_dino_oof(
-                data_root=DATA_ROOT,
-                preds_root=DINO_OOF_PRED_ROOT,
-                folds=int(DINO_OOF_FOLDS),
-                fold=-1,
-                seed=int(SEED),
-                dino_path=str(DINO_PATH),
-                head_ckpt=None,
-                head_ckpt_dir=DINO_OOF_MODEL_DIR,
-                image_size=int(DINO_IMAGE_SIZE),
-                decoder_dropout=float(DINO_DECODER_DROPOUT),
-                device=DEVICE,
-                tta_modes=tuple(x.strip() for x in DINO_OOF_TTA.split(",") if x.strip()),
-                limit=int(DINO_OOF_LIMIT),
-                save_probs=True,
-                score=True,
-                threshold_factor=float(DINO_THR_FACTOR),
-                min_area=int(DINO_MIN_AREA),
-                min_area_percent=float(DINO_MIN_AREA_PERCENT),
-                min_confidence=float(DINO_MIN_CONFIDENCE),
-                closing=int(DINO_MORPH_CLOSE_K),
-                opening=int(DINO_MORPH_OPEN_K),
-                morph_iters=int(DINO_MORPH_ITERS),
-                closing_iters=int(DINO_MORPH_CLOSE_ITERS),
-                opening_iters=int(DINO_MORPH_OPEN_ITERS),
-                local_files_only=bool(DINO_LOCAL_FILES_ONLY),
-            )
-
-    if RUN_DINO_TUNE:
-        thr_factors = _parse_float_list(os.environ.get("FORGERYSEG_DINO_TUNE_THR_FACTORS", "0.1,0.2,0.3,0.4,0.5"), [0.3])
-        min_areas = _parse_int_list(os.environ.get("FORGERYSEG_DINO_TUNE_MIN_AREAS", "0,30,64,128"), [30])
-        min_area_perc = _parse_float_list(os.environ.get("FORGERYSEG_DINO_TUNE_MIN_AREA_PERC", "0.0002,0.0005,0.001"), [0.0005])
-        min_conf = _parse_float_list(os.environ.get("FORGERYSEG_DINO_TUNE_MIN_CONF", "0.25,0.30,0.33,0.36,0.40"), [0.33])
-        out_cfg = os.environ.get("FORGERYSEG_DINO_TUNE_OUT", "outputs/dino_thresholds.json")
-        best = tune_dino_thresholds(
-            data_root=DATA_ROOT,
-            preds_root=DINO_OOF_PRED_ROOT,
-            folds=int(DINO_OOF_FOLDS),
-            seed=int(SEED),
-            fold=-1,
-            adaptive_threshold=True,
-            threshold_factors=thr_factors,
-            min_areas=min_areas,
-            min_area_percents=min_area_perc,
-            min_confidences=min_conf,
-            closing=int(DINO_MORPH_CLOSE_K),
-            closing_iters=int(DINO_MORPH_CLOSE_ITERS),
-            opening=int(DINO_MORPH_OPEN_K),
-            opening_iters=int(DINO_MORPH_OPEN_ITERS),
-            out_config=out_cfg,
-        )
-        if _env_bool("FORGERYSEG_DINO_TUNE_APPLY", default=True):
-            DINO_ADAPTIVE_THRESHOLD = bool(best.get("adaptive_threshold", True))
-            if DINO_ADAPTIVE_THRESHOLD:
-                DINO_THR_FACTOR = float(best.get("threshold_factor", DINO_THR_FACTOR))
-            else:
-                if best.get("threshold") is not None:
-                    DINO_THRESHOLD = float(best.get("threshold"))
-            if best.get("min_area") is not None:
-                DINO_MIN_AREA = int(best.get("min_area"))
-            if best.get("min_area_percent") is not None:
-                DINO_MIN_AREA_PERCENT = float(best.get("min_area_percent"))
-            if best.get("min_confidence") is not None:
-                DINO_MIN_CONFIDENCE = float(best.get("min_confidence"))
-            if best.get("closing_iters") is not None:
-                DINO_MORPH_CLOSE_ITERS = int(best.get("closing_iters"))
-            if best.get("opening_iters") is not None:
-                DINO_MORPH_OPEN_ITERS = int(best.get("opening_iters"))
-            DINO_MORPH_ITERS = max(int(DINO_MORPH_CLOSE_ITERS), int(DINO_MORPH_OPEN_ITERS))
-            print("[DINO TUNE] applied best params:")
-            print(" - adaptive:", DINO_ADAPTIVE_THRESHOLD)
-            print(" - thr_factor:", DINO_THR_FACTOR, "thr_fixed:", DINO_THRESHOLD)
-            print(" - min_area:", DINO_MIN_AREA, "min_area_percent:", DINO_MIN_AREA_PERCENT)
-            print(" - min_confidence:", DINO_MIN_CONFIDENCE)
-
-# %%
-# Fase 3d — Score local (train) do pipeline DINO-only
-#
-# Calcula RecodAI F1 no train usando o modelo atual e o mesmo pos-processamento
-# da submissao. Pode ser custoso em CPU.
-
-if DINO_ONLY:
-    RUN_DINO_SCORE_TRAIN = _env_bool("FORGERYSEG_DINO_SCORE_TRAIN", default=True)
-    DINO_SCORE_LIMIT = int(os.environ.get("FORGERYSEG_DINO_SCORE_LIMIT", "0"))
-    DINO_SCORE_TTA = _env_bool("FORGERYSEG_DINO_SCORE_TTA", default=DINO_USE_TTA)
-    dino_train_score = None
-
-    if RUN_DINO_SCORE_TRAIN:
-        if dino_model is None:
-            raise RuntimeError("[DINO SCORE] modelo nao carregado.")
-        dino_model.eval()
-
-        from forgeryseg.dataset import load_image, load_mask_instances
-        from forgeryseg.metric import score_image
-        from forgeryseg.postprocess import dino_prob_to_instances
-        from forgeryseg.inference import apply_tta, undo_tta
-
-        import csv
-        from datetime import datetime
-
-        TTA_MODES = ("none", "hflip", "vflip", "rot90", "rot180", "rot270")
-
-        @torch.no_grad()
-        def _score_predict_prob(img_rgb: np.ndarray) -> np.ndarray:
-            orig_h, orig_w = img_rgb.shape[:2]
-            img_rs = cv2.resize(img_rgb, (DINO_IMAGE_SIZE, DINO_IMAGE_SIZE), interpolation=cv2.INTER_AREA)
-            x = torch.from_numpy(img_rs).permute(2, 0, 1).float().unsqueeze(0) / 255.0
-            x = x.to(DEVICE)
-            logits = dino_model(x)
-            prob = torch.sigmoid(logits)[0, 0].detach().cpu().numpy().astype(np.float32)
-            if prob.shape != (orig_h, orig_w):
-                prob = cv2.resize(prob, (orig_w, orig_h), interpolation=cv2.INTER_LINEAR)
-            return prob
-
-        def _score_tta_predict(img_rgb: np.ndarray) -> np.ndarray:
-            if not DINO_SCORE_TTA:
-                return _score_predict_prob(img_rgb)
-            preds = []
-            for mode in TTA_MODES:
-                img_t = apply_tta(img_rgb, mode)
-                prob_t = _score_predict_prob(img_t)
-                prob = undo_tta(prob_t, mode)
-                preds.append(prob)
-            return np.mean(preds, axis=0).astype(np.float32)
-
-        samples = train_samples
-        if DINO_SCORE_LIMIT > 0:
-            samples = samples[:DINO_SCORE_LIMIT]
-
-        scores = []
-        rows = []
-        for sample in samples:
-            img = load_image(sample.image_path, as_rgb=True)
-            prob = _score_tta_predict(img)
-            if DINO_USE_INSTANCES:
-                pred_instances = dino_prob_to_instances(
-                    prob,
-                    threshold_factor=DINO_THR_FACTOR,
-                    min_area=DINO_MIN_AREA,
-                    min_area_percent=DINO_MIN_AREA_PERCENT,
-                    min_confidence=DINO_MIN_CONFIDENCE,
-                    closing_ksize=DINO_MORPH_CLOSE_K,
-                    opening_ksize=DINO_MORPH_OPEN_K,
-                    morph_iters=DINO_MORPH_ITERS,
-                    closing_iters=DINO_MORPH_CLOSE_ITERS,
-                    opening_iters=DINO_MORPH_OPEN_ITERS,
-                    adaptive_threshold=DINO_ADAPTIVE_THRESHOLD,
-                    threshold=DINO_THRESHOLD,
-                )
-            else:
-                pred_instances = _postprocess_prob(prob)
-
-            gt_instances = load_mask_instances(sample.mask_path) if sample.mask_path else []
-            score_val = float(score_image(gt_instances, pred_instances))
-            scores.append(score_val)
-            rows.append({"case_id": sample.case_id, "score": score_val})
-
-        mean_score = float(np.mean(scores)) if scores else float("nan")
-        dino_train_score = float(mean_score)
-        print(f"[DINO SCORE] mean train RecodAI F1: {mean_score:.6f}")
-
-        run_dir = Path("runs") / f"dino_train_score_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-        run_dir.mkdir(parents=True, exist_ok=True)
-        score_csv = run_dir / "scores.csv"
-        with score_csv.open("w", newline="") as f:
-            writer = csv.DictWriter(f, fieldnames=["case_id", "score"])
-            writer.writeheader()
-            writer.writerows(rows)
-        print("[DINO SCORE] wrote:", score_csv)
-
-# %%
-# Fase 3e — Report rapido (OOF + parametros + score)
-if DINO_ONLY:
-    print("=== DINO REPORT ===")
-    print("DINO_PATH:", DINO_PATH)
-    print("IMAGE_SIZE:", DINO_IMAGE_SIZE)
-    print("USE_TTA:", DINO_USE_TTA)
-    print("USE_INSTANCES:", DINO_USE_INSTANCES)
-    print("ADAPTIVE_THR:", DINO_ADAPTIVE_THRESHOLD)
-    print("THR_FACTOR:", DINO_THR_FACTOR, "THR_FIXED:", DINO_THRESHOLD)
-    print("MIN_AREA:", DINO_MIN_AREA, "MIN_AREA_PERCENT:", DINO_MIN_AREA_PERCENT)
-    print("MIN_CONFIDENCE:", DINO_MIN_CONFIDENCE)
-    print("CLOSE_K:", DINO_MORPH_CLOSE_K, "CLOSE_ITERS:", DINO_MORPH_CLOSE_ITERS)
-    print("OPEN_K:", DINO_MORPH_OPEN_K, "OPEN_ITERS:", DINO_MORPH_OPEN_ITERS)
-
-    if "dino_oof_result" in globals() and dino_oof_result is not None:
-        try:
-            print("OOF mean score:", dino_oof_result.mean_score)
-            print("OOF fold scores:", dino_oof_result.fold_scores)
-            print("OOF run_dir:", dino_oof_result.run_dir)
-        except Exception:
-            pass
-    if "dino_train_score" in globals() and dino_train_score is not None:
-        print("Train mean score:", dino_train_score)
-    print("===================")
-
-# %% [markdown]
-# ## Fase 4 — Geração de `submission.csv` (roteiro oficial)
-#
-# A competição pede **segmentação** de regiões de copy-move e usa uma variante do **F1-score**,
-# portanto o foco é equilibrar precisão e recall. A métrica oficial usa **RLE (Run-Length Encoding)**.
-#
-# Abaixo está o **roteiro completo** para montar o notebook de submissão:
-#
-# ### 1) Importar bibliotecas e ler dados
-# - Define os caminhos de treino e teste no Kaggle.
-# - Lista as imagens de teste para gerar o CSV.
-#
-# ### 2) Funções de codificação RLE
-# - Usa RLE para converter máscaras binárias em string.
-#
-# ### 3) Lógica de predição (baseline)
-# - Baseline simples: assume todas as imagens como `authentic`.
-# - Opcional: gerar máscara via modelo e converter para RLE.
-#
-# ### 4) Gerar e salvar o arquivo de submissão
-# - Salva `submission.csv` em `/kaggle/working/`.
-
-# %%
-# Fase 4 — Célula 8: Imports + leitura de dados (roteiro oficial)
-import pandas as pd
-from PIL import Image
-from pathlib import Path
-import matplotlib.pyplot as plt
-
-# Usa o DATA_ROOT detectado na Fase 1 (evita path hardcoded do Kaggle).
-DATA_DIR = DATA_ROOT
-
-TRAIN_DIR = DATA_DIR / "train_images"
-TEST_DIR = DATA_DIR / "test_images"
-TRAIN_MASKS = DATA_DIR / "train_masks"  # se houver
-
-VALID_EXTS = {".png", ".jpg", ".jpeg", ".tif", ".tiff"}
-test_images = sorted([p for p in TEST_DIR.iterdir() if p.suffix.lower() in VALID_EXTS])
-test_by_id = {p.stem: p for p in test_images}
-
-sample_submission_path = DATA_DIR / "sample_submission.csv"
-sample_submission = None
-case_ids = [p.stem for p in test_images]
-if sample_submission_path.exists():
-    sample_submission = pd.read_csv(sample_submission_path)
-    if "case_id" in sample_submission.columns:
-        case_ids = sample_submission["case_id"].tolist()
-
-print("DATA_DIR:", DATA_DIR)
-print("TEST_DIR:", TEST_DIR)
-print("#test images:", len(test_images))
-
-# %%
-# Fase 4 — Célula 9: Funções RLE (roteiro oficial)
-# A competição usa JSON para a lista de pares [start, length, ...] e suporta múltiplas instâncias separadas por ';'.
-from forgeryseg.rle import encode_instances
-
-
-def encode_submission(mask_union: np.ndarray) -> str:
-    return encode_instances(mask_union)
-
-# %%
-# Fase 4 — Célula 10: Baseline simples (tudo authentic)
-if sample_submission is not None:
-    submissions = sample_submission.copy()
-    submissions["annotation"] = "authentic"
-else:
-    submissions = pd.DataFrame(
-        {
-            "case_id": case_ids,
-            "annotation": ["authentic"] * len(case_ids),
-        }
-    )
-
-submissions.head()
-
-# %%
-# Fase 4 — Célula 11: Exemplo de loop com modelo (opcional)
-# Ative com FORGERYSEG_USE_MODEL_SUBMISSION=1 e defina `model`.
-USE_MODEL_SUBMISSION = _env_bool("FORGERYSEG_USE_MODEL_SUBMISSION", default=False)
-THRESHOLD = float(os.environ.get("FORGERYSEG_SUBMISSION_THRESHOLD", "0.5"))
-
-submissions_from_model = None
-if USE_MODEL_SUBMISSION:
-    if "model" not in globals():
-        raise RuntimeError("Defina a variável `model` antes de ativar FORGERYSEG_USE_MODEL_SUBMISSION=1.")
-
-    from forgeryseg.inference import apply_tta, undo_tta
-
-    USE_TTA = _env_bool("FORGERYSEG_TTA", default=True)
-    TTA_MODES = ("none", "hflip", "vflip", "rot90", "rot180", "rot270")
-
-
-    def _default_predict_fn(image: np.ndarray) -> np.ndarray:
-        if hasattr(model, "predict"):
-            pred = model.predict(image[None])[0]
-        else:
-            from forgeryseg.inference import predict_image
-
-            pred = predict_image(model, image, DEVICE)
-        pred = np.asarray(pred)
-        if pred.ndim > 2:
-            pred = np.squeeze(pred)
-        if pred.ndim != 2:
-            raise ValueError(f"Predição esperada HxW, obtido shape={pred.shape}")
-        return pred.astype(np.float32)
-
-    def _tta_predict(image: np.ndarray) -> np.ndarray:
-        if not USE_TTA:
-            return _default_predict_fn(image)
-        preds = []
-        for mode in TTA_MODES:
-            img_t = apply_tta(image, mode)
-            pred_t = _default_predict_fn(img_t)
-            pred = undo_tta(pred_t, mode)
-            preds.append(pred)
-        return np.mean(preds, axis=0)
-
-    annotations = []
-    for case_id in case_ids:
-        key = str(case_id)
-        if key not in test_by_id:
-            raise FileNotFoundError(f"Não encontrei imagem para case_id={case_id!r}")
-        img_path = test_by_id[key]
-        # carregue e processe a imagem
-        img = np.array(Image.open(img_path)) / 255.0
-        # modelo deve gerar um mapa de probabilidade ou máscara
-        pred_prob = _tta_predict(img)
-        binary_mask = (pred_prob > THRESHOLD).astype(np.uint8)
-        annotations.append(encode_submission(binary_mask))
-
-    submissions_from_model = pd.DataFrame(
-        {
-            "case_id": case_ids,
-            "annotation": annotations,
-        }
-    )
-
-    submissions_from_model.head()
-
-# %%
-# Fase 4 — Célula 11b: Submissão DINO-only (offline)
-submissions_from_dino = None
-if DINO_ONLY:
-    if dino_model is None:
-        raise RuntimeError("[DINO] modelo não carregado.")
-
-    dino_model.eval()
-
-    TTA_MODES = ("none", "hflip", "vflip", "rot90", "rot180", "rot270")
-
-    from forgeryseg.inference import apply_tta, undo_tta
-    from forgeryseg.postprocess import dino_prob_to_instances
-
-
-    @torch.no_grad()
-    def _dino_predict_prob(img_rgb: np.ndarray) -> np.ndarray:
-        orig_h, orig_w = img_rgb.shape[:2]
-        img_rs = cv2.resize(img_rgb, (DINO_IMAGE_SIZE, DINO_IMAGE_SIZE), interpolation=cv2.INTER_AREA)
-        x = torch.from_numpy(img_rs).permute(2, 0, 1).float().unsqueeze(0) / 255.0
-        x = x.to(DEVICE)
-        logits = dino_model(x)
-        prob = torch.sigmoid(logits)[0, 0].detach().cpu().numpy().astype(np.float32)
-        if prob.shape != (orig_h, orig_w):
-            prob = cv2.resize(prob, (orig_w, orig_h), interpolation=cv2.INTER_LINEAR)
-        return prob
-
-    def _dino_tta_predict(img_rgb: np.ndarray) -> np.ndarray:
-        if not DINO_USE_TTA:
-            return _dino_predict_prob(img_rgb)
-        preds = []
-        for mode in TTA_MODES:
-            img_t = apply_tta(img_rgb, mode)
-            prob_t = _dino_predict_prob(img_t)
-            prob = undo_tta(prob_t, mode)
-            preds.append(prob)
-        return np.mean(preds, axis=0).astype(np.float32)
-
-    annotations = []
-    for case_id in case_ids:
-        key = str(case_id)
-        if key not in test_by_id:
-            raise FileNotFoundError(f"[DINO] imagem não encontrada para case_id={case_id!r}")
-        img_path = test_by_id[key]
-        img = np.array(Image.open(img_path).convert("RGB"))
-        prob = _dino_tta_predict(img)
-        if DINO_USE_INSTANCES:
-            instances = dino_prob_to_instances(
-                prob,
-                threshold_factor=DINO_THR_FACTOR,
-                min_area=DINO_MIN_AREA,
-                min_area_percent=DINO_MIN_AREA_PERCENT,
-                min_confidence=DINO_MIN_CONFIDENCE,
-                closing_ksize=DINO_MORPH_CLOSE_K,
-                opening_ksize=DINO_MORPH_OPEN_K,
-                morph_iters=DINO_MORPH_ITERS,
-                closing_iters=DINO_MORPH_CLOSE_ITERS,
-                opening_iters=DINO_MORPH_OPEN_ITERS,
-                adaptive_threshold=DINO_ADAPTIVE_THRESHOLD,
-                threshold=DINO_THRESHOLD,
-            )
-            annotations.append(encode_submission(instances))
-        else:
-            mask = _postprocess_prob(prob)
-            annotations.append(encode_submission(mask))
-
-    submissions_from_dino = pd.DataFrame(
-        {
-            "case_id": case_ids,
-            "annotation": annotations,
-        }
-    )
-
-    submissions_from_dino.head()
-
-# %%
-# Fase 4 — Célula 12: Salvar submission.csv (roteiro oficial)
-def output_root() -> Path:
-    return Path("/kaggle/working") if is_kaggle() else Path(".").resolve()
-
-
-def _write_submission_csv(submissions_to_save: pd.DataFrame) -> Path:
-    submission_path = output_root() / "submission.csv"
-    pd.DataFrame(submissions_to_save).to_csv(submission_path, index=False)
-    return submission_path
-
-
-RUN_SUBMISSION_SIMPLE = True  # Sempre ativo; não desabilitar neste notebook.
-print("RUN_SUBMISSION_SIMPLE:", RUN_SUBMISSION_SIMPLE)
-
-if DINO_ONLY and submissions_from_dino is not None:
-    submissions_to_save = submissions_from_dino
-else:
-    submissions_to_save = submissions_from_model if USE_MODEL_SUBMISSION else submissions
-submission_path = _write_submission_csv(submissions_to_save)
-print("Wrote:", submission_path)
-
-
-# %% [markdown]
-# ## Fase 4b — Submissão via `submit_ensemble.py` (opcional)
-#
-# - Usa os checkpoints em `outputs/models_seg/...`.
-# - Respeita o `configs/infer_ensemble.json` (inclui gate do classificador e pesos do ensemble).
-#
-# Para desligar/ligar: `FORGERYSEG_RUN_SUBMISSION_SCRIPT=0|1`.
-
-# %%
-# Fase 4b — Célula 13: Gerar submission.csv via script (opcional)
-RUN_SUBMISSION_SCRIPT = True  # Sempre ativo; não desabilitar neste notebook.
-print("RUN_SUBMISSION_SCRIPT:", RUN_SUBMISSION_SCRIPT)
-
-
-def _find_submit_ensemble_script() -> Path:
-    candidates: list[Path] = []
-    if PROJECT_ROOT is not None:
-        candidates.append(PROJECT_ROOT / "scripts" / "submit_ensemble.py")
-    candidates.append(Path("scripts/submit_ensemble.py").resolve())
-
-    if is_kaggle():
-        ki = Path("/kaggle/input")
-        if ki.exists():
-            for ds in sorted(ki.glob("*")):
-                for base in (ds, ds / "recodai_bundle"):
-                    p = base / "scripts" / "submit_ensemble.py"
-                    if p.exists():
-                        candidates.append(p)
-
-    for p in candidates:
-        if p.exists():
-            return p
+# Fase 0 — Sanidade rápida do dataset
+if not (DATA_ROOT / "train_images").exists():
     raise FileNotFoundError(
-        "Não encontrei `scripts/submit_ensemble.py`.\n"
-        "- Solução (Kaggle): anexe o dataset do repositório (bundle) contendo `scripts/`.\n"
-        "- Solução (local): rode a partir do root do repo (onde existe `scripts/`)."
+        f"Dataset não encontrado. Verifique DATA_ROOT: {DATA_ROOT} (esperado: .../train_images)."
     )
 
+train_samples = build_train_index(DATA_ROOT, strict=False)
+supp_samples = build_supplemental_index(DATA_ROOT, strict=False)
+test_samples = build_test_index(DATA_ROOT)
 
-def _find_infer_cfg_path() -> Path | None:
-    candidates: list[Path] = []
-    if PROJECT_ROOT is not None:
-        candidates.append(PROJECT_ROOT / "configs" / "infer_ensemble.json")
-    candidates.append(Path("configs/infer_ensemble.json").resolve())
+n_auth = sum(1 for s in train_samples if s.is_authentic)
+n_forged = sum(1 for s in train_samples if s.is_authentic is False)
 
-    if is_kaggle():
-        ki = Path("/kaggle/input")
-        if ki.exists():
-            for ds in sorted(ki.glob("*")):
-                for base in (ds, ds / "recodai_bundle"):
-                    p = base / "configs" / "infer_ensemble.json"
-                    if p.exists():
-                        candidates.append(p)
+print("train/authentic:", n_auth)
+print("train/forged:", n_forged)
+print("supplemental:", len(supp_samples))
+print("test:", len(test_samples))
 
-    for p in candidates:
-        if p.exists():
-            return p
-    return None
+# %% [markdown]
+# ## Fase 1 — Treino do classificador (opcional)
+#
+# O classificador é usado como **gate** para evitar segmentar imagens
+# claramente autênticas. O threshold ótimo (F1) é salvo no checkpoint e
+# pode ser usado automaticamente na inferência (`cls_skip_threshold=auto`).
+#
+# Dica: se você **não** treinar o classificador, desative o gate na inferência
+# (`--cls-skip-threshold 0.0`).
 
+# %%
+# Fase 1 — Treino do classificador (via script)
+cls_config_path = CLS_CONFIG
+if OFFLINE_NO_DOWNLOAD:
+    cls_config_path = write_config(
+        CLS_CONFIG,
+        OUTPUTS_ROOT / "configs" / "cls_offline.json",
+        {"pretrained": False},
+    )
 
-def _find_models_dir_with_ckpt() -> Path | None:
-    candidates: list[Path] = []
-    if PROJECT_ROOT is not None:
-        candidates.append(PROJECT_ROOT / "outputs" / "models_seg")
-    candidates.append(Path("outputs/models_seg").resolve())
+if RUN_TRAIN_CLS:
+    train_cls_script = REPO_ROOT / "scripts" / "train_cls_cv.py"
+    if not train_cls_script.exists():
+        raise FileNotFoundError(f"Não encontrei {train_cls_script}.")
 
-    if is_kaggle():
-        ki = Path("/kaggle/input")
-        if ki.exists():
-            for ds in sorted(ki.glob("*")):
-                for base in (ds, ds / "recodai_bundle"):
-                    cand = base / "outputs" / "models_seg"
-                    if cand.exists():
-                        candidates.append(cand)
-
-    for cand in candidates:
-        if any(cand.glob("*/*/best.pt")):
-            return cand
-        if any(cand.glob("*/best.pt")):
-            return cand
-        if any(cand.glob("**/best.pt")):
-            return cand
-        if any(cand.glob("*/*/last.pt")):
-            return cand
-        if any(cand.glob("*/last.pt")):
-            return cand
-        if any(cand.glob("**/last.pt")):
-            return cand
-    return None
-
-
-submission_path = output_root() / "submission.csv"
-try:
-    submit_script = _find_submit_ensemble_script()
-except FileNotFoundError as exc:
-    print(f"[SUBMISSION] {exc}")
-    print("[SUBMISSION] script não encontrado; mantendo submission.csv atual.")
+    cmd = [
+        sys.executable,
+        str(train_cls_script),
+        "--config",
+        str(cls_config_path),
+        "--data-root",
+        str(DATA_ROOT),
+        "--output-dir",
+        str(OUTPUTS_ROOT),
+        "--folds",
+        str(N_FOLDS),
+    ]
+    if FOLD >= 0:
+        cmd += ["--fold", str(FOLD)]
+    if CACHE_ROOT is not None:
+        cmd += ["--cache-root", str(CACHE_ROOT)]
+    run_cmd(cmd)
 else:
-    infer_cfg_path = _find_infer_cfg_path()
-    models_dir = _find_models_dir_with_ckpt()
-    if models_dir is None:
-        print("[SUBMISSION] nenhum checkpoint encontrado em outputs/models_seg; mantendo submission.csv atual.")
-    else:
-        cmd = [
-            sys.executable,
-            str(submit_script),
-            "--data-root",
-            str(DATA_ROOT),
-            "--out-csv",
-            str(submission_path),
-        ]
-        cmd += ["--models-dir", str(models_dir)]
-        if infer_cfg_path is not None:
-            cmd += ["--config", str(infer_cfg_path)]
+    print("[CLS] RUN_TRAIN_CLS=False (pulando).")
 
-        print("[SUBMISSION] script:", submit_script)
-        if infer_cfg_path is not None:
-            print("[SUBMISSION] cfg:", infer_cfg_path)
-        print("[SUBMISSION] running:", " ".join(cmd))
-        subprocess.check_call(cmd)
-        print("[SUBMISSION] wrote:", submission_path)
+# %% [markdown]
+# ## Fase 2 — Treino do segmentador (opcional)
+#
+# Aqui treinamos o modelo de segmentação que gera as máscaras de fraude.
+# Você pode testar diferentes arquiteturas em `configs/` e combinar tudo
+# na inferência com *ensemble* e **TTA**.
+#
+# Observação: configs com *DINOv2/HF* exigem cache local e `local_files_only=true`
+# no Kaggle (internet OFF).
+
+# %%
+# Fase 2 — Treino do segmentador (via script)
+seg_config_path = SEG_CONFIG
+if OFFLINE_NO_DOWNLOAD:
+    seg_config_path = write_config(
+        SEG_CONFIG,
+        OUTPUTS_ROOT / "configs" / "seg_offline.json",
+        {"encoder_weights": "", "pretrained": False},
+    )
+
+if RUN_TRAIN_SEG:
+    train_seg_script = REPO_ROOT / "scripts" / "train_seg_smp_cv.py"
+    if not train_seg_script.exists():
+        raise FileNotFoundError(f"Não encontrei {train_seg_script}.")
+
+    cmd = [
+        sys.executable,
+        str(train_seg_script),
+        "--config",
+        str(seg_config_path),
+        "--data-root",
+        str(DATA_ROOT),
+        "--output-dir",
+        str(OUTPUTS_ROOT),
+        "--folds",
+        str(N_FOLDS),
+    ]
+    if FOLD >= 0:
+        cmd += ["--fold", str(FOLD)]
+    if CACHE_ROOT is not None:
+        cmd += ["--cache-root", str(CACHE_ROOT)]
+    run_cmd(cmd)
+else:
+    print("[SEG] RUN_TRAIN_SEG=False (pulando).")
+
+# %% [markdown]
+# ## Fase 3 — Inferência + pós-processamento (TTA + morfologia)
+#
+# A inferência usa `scripts/submit_ensemble.py` e o arquivo
+# `configs/infer_ensemble.json`, que já inclui:
+#
+# - **TTA**: `none`, `hflip`, `vflip`
+# - **Pós-processamento morfológico**: *closing*, *opening*, *fill holes*
+# - **Filtro por área/confiança** e threshold adaptativo
+#
+# Para ajustar, edite `configs/infer_ensemble.json` ou passe flags no CLI.
+
+# %%
+# Fase 3 — Gerar submission.csv
+infer_config_path = INFER_CONFIG
+if OFFLINE_NO_DOWNLOAD and env_bool("FORGERYSEG_DISABLE_HF_MODELS", default=True):
+    # Remove modelos que dependem de HuggingFace (ex.: DINOv2) quando não queremos
+    # depender de cache HF no Kaggle offline.
+    try:
+        with INFER_CONFIG.open("r") as f:
+            infer_cfg = json.load(f)
+        models = infer_cfg.get("models", [])
+        filtered = []
+        dropped = []
+        for m in models:
+            mid = str(m.get("model_id", ""))
+            if "dinov2" in mid.lower():
+                dropped.append(mid)
+                continue
+            filtered.append(m)
+        if filtered and dropped:
+            total_w = sum(float(m.get("weight", 1.0)) for m in filtered) or 1.0
+            for m in filtered:
+                m["weight"] = float(m.get("weight", 1.0)) / total_w
+            infer_cfg["models"] = filtered
+            infer_config_path = write_config(INFER_CONFIG, OUTPUTS_ROOT / "configs" / "infer_offline.json", infer_cfg)
+            print("[INFER] OFFLINE: removendo modelos HF:", ", ".join(dropped))
+    except Exception:
+        pass
+
+submission_path = Path("/kaggle/working/submission.csv") if is_kaggle() else OUTPUTS_ROOT / "submission.csv"
+models_seg_dir = OUTPUTS_ROOT / "models_seg"
+models_cls_dir = OUTPUTS_ROOT / "models_cls"
+
+# Recalcula presença de checkpoints após treino
+has_cls_now = has_any_ckpt("models_cls", "fold_*/best.pt", OUTPUTS_ROOT)
+
+if RUN_SUBMISSION:
+    submit_script = REPO_ROOT / "scripts" / "submit_ensemble.py"
+    if not submit_script.exists():
+        raise FileNotFoundError(f"Não encontrei {submit_script}.")
+
+    cmd = [
+        sys.executable,
+        str(submit_script),
+        "--data-root",
+        str(DATA_ROOT),
+        "--out-csv",
+        str(submission_path),
+        "--config",
+        str(infer_config_path),
+    ]
+    if models_seg_dir.exists():
+        cmd += ["--models-dir", str(models_seg_dir)]
+    if models_cls_dir.exists():
+        cmd += ["--cls-models-dir", str(models_cls_dir)]
+    if not has_cls_now:
+        cmd += ["--cls-skip-threshold", "0.0"]
+        print("[CLS] sem checkpoints -> gate desativado (cls_skip_threshold=0.0).")
+
+    run_cmd(cmd)
+    print("submission.csv ->", submission_path)
+else:
+    print("[SUBMISSION] RUN_SUBMISSION=False (pulando).")

@@ -221,6 +221,9 @@ class _DinoV2Base(nn.Module):
     def _encode(self, x: torch.Tensor) -> tuple[torch.Tensor, tuple[int, int], tuple[int, int], tuple[int, int]]:
         if x.ndim != 4:
             raise ValueError("Expected BCHW tensor")
+        if x.shape[1] > 3:
+            # DINOv2 backbone is RGB-only; discard extra channels (e.g. FFT)
+            x = x[:, :3, :, :]
         orig_hw = (int(x.shape[-2]), int(x.shape[-1]))
         x_pad, padded_hw = _pad_to_multiple(x, self.patch_size)
         if self.freeze_encoder:

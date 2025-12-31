@@ -46,8 +46,11 @@ def main() -> None:
     encoder_weights = args.encoder_weights or cfg.get("encoder_weights", "imagenet")
     if encoder_weights == "":
         encoder_weights = None
+    in_channels = int(cfg.get("in_channels", 3))
+    if in_channels != 3 and encoder_weights:
+        encoder_weights = None
 
-    model = build_model(encoder_name=encoder_name, encoder_weights=encoder_weights)
+    model = build_model(encoder_name=encoder_name, encoder_weights=encoder_weights, in_channels=in_channels)
     model.load_state_dict(state)
     model.to(device)
     model.eval()
@@ -62,6 +65,7 @@ def main() -> None:
             tile_size=args.tile_size,
             overlap=args.overlap,
             max_size=args.max_size,
+            use_freq_channels=(in_channels == 4),
         )
         pred_path = (preds_root / sample.rel_path).with_suffix(".npy")
         pred_path.parent.mkdir(parents=True, exist_ok=True)

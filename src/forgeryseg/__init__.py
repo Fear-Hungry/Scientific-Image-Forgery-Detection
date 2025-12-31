@@ -5,6 +5,7 @@ __all__ = [
     "checkpoints",
     "constants",
     "dataset",
+    "frequency",
     "inference",
     "losses",
     "metric",

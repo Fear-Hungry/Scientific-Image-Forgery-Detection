@@ -134,6 +134,13 @@ def main() -> None:
 
     encoder_name = cfg.get("encoder_name", "convnext_tiny")
     encoder_weights = cfg.get("encoder_weights", "imagenet")
+    use_freq_channels = bool(cfg.get("use_freq_channels", False))
+    in_channels = int(cfg.get("in_channels", 4 if use_freq_channels else 3))
+    cfg["in_channels"] = int(in_channels)
+    cfg["use_freq_channels"] = bool(use_freq_channels)
+    if in_channels != 3 and encoder_weights:
+        print("[WARN] in_channels != 3; desativando encoder_weights para evitar mismatch.")
+        encoder_weights = None
 
     folds = list(_iter_stratified_folds(y, args.folds, seed))
     if args.fold >= 0:
@@ -171,6 +178,7 @@ def main() -> None:
             min_pos_pixels=min_pos_pixels,
             max_tries=max_tries,
             seed=seed,
+            use_freq_channels=use_freq_channels,
         )
         val_ds = PatchDataset(
             val_samples,
@@ -178,6 +186,7 @@ def main() -> None:
             train=False,
             augment=val_aug,
             seed=seed,
+            use_freq_channels=use_freq_channels,
         )
 
         weights = [pos_sample_weight if not s.is_authentic else 1.0 for s in train_samples]
@@ -201,7 +210,7 @@ def main() -> None:
         model = build_model(
             encoder_name=encoder_name,
             encoder_weights=encoder_weights,
-            in_channels=3,
+            in_channels=in_channels,
             classes=1,
         ).to(device)
         criterion = _build_criterion(loss_name, cfg)

@@ -48,6 +48,7 @@ class SegEntry:
     model: nn.Module
     weight: float
     score: float | None
+    in_channels: int
 
 
 def _maybe_tqdm(it: Iterable, enabled: bool, desc: str):
@@ -174,7 +175,17 @@ def _load_seg_models(
         m.to(device)
         m.eval()
         w = float(model_weights.get(model_id, 1.0))
-        entries.append(SegEntry(model_id=model_id, ckpt_path=ckpt_path, model=m, weight=w, score=score))
+        in_channels = int(cfg.get("in_channels", 3))
+        entries.append(
+            SegEntry(
+                model_id=model_id,
+                ckpt_path=ckpt_path,
+                model=m,
+                weight=w,
+                score=score,
+                in_channels=in_channels,
+            )
+        )
 
     if not entries:
         tried = ", ".join(
@@ -272,7 +283,15 @@ def predict_seg_ensemble_prob(
         img_t = apply_tta(image, mode)
         ens: np.ndarray | None = None
         for e in entries:
-            p = predict_image(e.model, img_t, device, tile_size=tile_size, overlap=overlap, max_size=max_size)
+            p = predict_image(
+                e.model,
+                img_t,
+                device,
+                tile_size=tile_size,
+                overlap=overlap,
+                max_size=max_size,
+                use_freq_channels=(int(e.in_channels) == 4),
+            )
             p = p * float(e.weight)
             ens = p if ens is None else (ens + p)
         assert ens is not None
@@ -400,7 +419,11 @@ def main() -> None:
     if isinstance(cfg.get("tta_modes"), (list, tuple)):
         tta_modes = tuple(str(x) for x in cfg.get("tta_modes") if str(x).strip())
     else:
-        tta_modes = tuple(_parse_csv_list(cfg.get("tta", args.tta)))
+        raw_tta = str(cfg.get("tta", args.tta))
+        if raw_tta.strip().lower() == "d4":
+            tta_modes = ("none", "rot90", "rot180", "rot270", "hflip", "vflip", "transpose", "antitranspose")
+        else:
+            tta_modes = tuple(_parse_csv_list(raw_tta))
 
     if not model_ids and model_weights and weights_from_config:
         model_ids = sorted(model_weights.keys())

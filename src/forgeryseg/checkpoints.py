@@ -31,6 +31,7 @@ def build_segmentation_from_config(cfg: dict[str, Any]) -> nn.Module:
     backend = str(cfg.get("backend", "smp")).lower()
     arch = str(cfg.get("arch", cfg.get("model_id", "unetplusplus"))).lower()
     classes = int(cfg.get("classes", 1))
+    in_channels = int(cfg.get("in_channels", 3))
 
     if backend == "smp":
         encoder_name = str(cfg.get("encoder_name", "efficientnet-b4"))
@@ -41,6 +42,7 @@ def build_segmentation_from_config(cfg: dict[str, Any]) -> nn.Module:
                 encoder_name=encoder_name,
                 encoder_weights=None,
                 encoder_depth=encoder_depth,
+                in_channels=in_channels,
                 classes=classes,
                 strict_weights=True,
             )
@@ -49,6 +51,7 @@ def build_segmentation_from_config(cfg: dict[str, Any]) -> nn.Module:
                 encoder_name=encoder_name,
                 encoder_weights=None,
                 encoder_depth=encoder_depth,
+                in_channels=in_channels,
                 classes=classes,
                 strict_weights=True,
             )
@@ -57,6 +60,7 @@ def build_segmentation_from_config(cfg: dict[str, Any]) -> nn.Module:
                 encoder_name=encoder_name,
                 encoder_weights=None,
                 encoder_depth=encoder_depth,
+                in_channels=in_channels,
                 classes=classes,
                 strict_weights=True,
             )
@@ -65,11 +69,32 @@ def build_segmentation_from_config(cfg: dict[str, Any]) -> nn.Module:
             return builders.build_segformer(
                 encoder_name=encoder_name,
                 encoder_weights=None,
+                in_channels=in_channels,
                 classes=classes,
                 strict_weights=True,
             )
 
         raise ValueError(f"Unknown SMP segmentation arch: {arch!r}")
+
+    if backend == "hybrid" or arch == "hybrid":
+        from .models.hybrid import build_hybrid_model
+
+        return build_hybrid_model(
+            encoder_name=str(cfg.get("encoder_name", "efficientnet-b4")),
+            encoder_weights=None,
+            in_channels=in_channels,
+            classes=classes,
+            dino_model_id=str(cfg.get("dino_model_id", "facebook/dinov2-base")),
+            decoder_channels=cfg.get("decoder_channels", (256, 128, 64, 32, 16)),
+            freeze_dino=bool(cfg.get("freeze_dino", True)),
+            dino_pretrained=bool(cfg.get("dino_pretrained", False)),
+            dino_cache_dir=cfg.get("dino_cache_dir") or cfg.get("cache_dir"),
+            dino_local_files_only=bool(cfg.get("local_files_only", True)),
+            dino_revision=cfg.get("dino_revision") or cfg.get("revision"),
+            dino_trust_remote_code=bool(cfg.get("trust_remote_code", False)),
+            dino_torch_dtype=cfg.get("torch_dtype", None),
+            attention_type=cfg.get("attention_type", "scse"),
+        )
 
     if backend in {"dinov2", "hf"}:
         model_id = str(

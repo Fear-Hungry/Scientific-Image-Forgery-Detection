@@ -22,6 +22,7 @@ from forgeryseg.augment import get_train_augment, get_val_augment
 from forgeryseg.dataset import PatchDataset, build_supplemental_index, build_train_index
 from forgeryseg.losses import BCEDiceLoss, BCETverskyLoss
 from forgeryseg.models import builders, dinov2
+from forgeryseg.models.hybrid import build_hybrid_model
 from forgeryseg.offline import configure_cache_dirs
 from forgeryseg.train import train_one_epoch, validate
 
@@ -79,6 +80,7 @@ def _build_criterion(name: str, cfg: dict) -> nn.Module:
 def _build_seg_model(cfg: dict) -> nn.Module:
     backend = str(cfg.get("backend", "smp")).lower()
     classes = int(cfg.get("classes", 1))
+    in_channels = int(cfg.get("in_channels", 3))
 
     if backend == "smp":
         arch = str(cfg.get("arch", "unetplusplus")).lower()
@@ -92,6 +94,7 @@ def _build_seg_model(cfg: dict) -> nn.Module:
             return builders.build_unet(
                 encoder_name=encoder_name,
                 encoder_weights=encoder_weights,
+                in_channels=in_channels,
                 classes=classes,
                 strict_weights=strict_weights,
             )
@@ -99,6 +102,7 @@ def _build_seg_model(cfg: dict) -> nn.Module:
             return builders.build_unetplusplus(
                 encoder_name=encoder_name,
                 encoder_weights=encoder_weights,
+                in_channels=in_channels,
                 classes=classes,
                 strict_weights=strict_weights,
             )
@@ -106,6 +110,7 @@ def _build_seg_model(cfg: dict) -> nn.Module:
             return builders.build_deeplabv3plus(
                 encoder_name=encoder_name,
                 encoder_weights=encoder_weights,
+                in_channels=in_channels,
                 classes=classes,
                 strict_weights=strict_weights,
             )
@@ -113,10 +118,29 @@ def _build_seg_model(cfg: dict) -> nn.Module:
             return builders.build_segformer(
                 encoder_name=encoder_name,
                 encoder_weights=encoder_weights,
+                in_channels=in_channels,
                 classes=classes,
                 strict_weights=strict_weights,
             )
         raise ValueError(f"Unknown SMP arch {arch!r}")
+
+    if backend == "hybrid" or str(cfg.get("arch", "")).lower() == "hybrid":
+        return build_hybrid_model(
+            encoder_name=str(cfg.get("encoder_name", "efficientnet-b4")),
+            encoder_weights=cfg.get("encoder_weights", None),
+            in_channels=in_channels,
+            classes=classes,
+            dino_model_id=str(cfg.get("dino_model_id", "facebook/dinov2-base")),
+            decoder_channels=cfg.get("decoder_channels", (256, 128, 64, 32, 16)),
+            freeze_dino=bool(cfg.get("freeze_dino", True)),
+            dino_pretrained=bool(cfg.get("dino_pretrained", True)),
+            dino_cache_dir=cfg.get("dino_cache_dir") or cfg.get("cache_dir"),
+            dino_local_files_only=bool(cfg.get("local_files_only", False)),
+            dino_revision=cfg.get("dino_revision") or cfg.get("revision"),
+            dino_trust_remote_code=bool(cfg.get("trust_remote_code", False)),
+            dino_torch_dtype=cfg.get("torch_dtype", None),
+            attention_type=cfg.get("attention_type", "scse"),
+        )
 
     if backend in {"dinov2", "hf"}:
         model_id = str(cfg.get("hf_model_id", cfg.get("encoder_name", "metaresearch/dinov2")))
@@ -206,6 +230,13 @@ def main() -> None:
     max_tries = int(cfg.get("max_tries", 10))
     pos_sample_weight = float(cfg.get("pos_sample_weight", 2.0))
     num_workers = int(cfg.get("num_workers", 4))
+    use_freq_channels = bool(cfg.get("use_freq_channels", False))
+    in_channels = int(cfg.get("in_channels", 4 if use_freq_channels else 3))
+    cfg["in_channels"] = int(in_channels)
+    cfg["use_freq_channels"] = bool(use_freq_channels)
+    if int(in_channels) != 3 and cfg.get("encoder_weights", None):
+        print("[WARN] in_channels != 3; desativando encoder_weights para evitar mismatch.")
+        cfg["encoder_weights"] = None
 
     copy_move_scale_range = cfg.get("copy_move_scale_range", (0.9, 1.1))
     if isinstance(copy_move_scale_range, (list, tuple)) and len(copy_move_scale_range) == 2:
@@ -242,6 +273,7 @@ def main() -> None:
             min_pos_pixels=min_pos_pixels,
             max_tries=max_tries,
             seed=seed,
+            use_freq_channels=use_freq_channels,
         )
         val_ds = PatchDataset(
             val_samples,
@@ -249,6 +281,7 @@ def main() -> None:
             train=False,
             augment=val_aug,
             seed=seed,
+            use_freq_channels=use_freq_channels,
         )
 
         weights = [pos_sample_weight if (s.is_authentic is False) else 1.0 for s in train_samples]
@@ -295,8 +328,12 @@ def main() -> None:
         best_dice = -1.0
         best_epoch = 0
         for epoch in range(1, epochs + 1):
-            tr = train_one_epoch(model, train_loader, criterion, optimizer, device, use_amp=use_amp, progress=True, desc=f"train {model_id}")
-            val_stats, val_dice = validate(model, val_loader, criterion, device, progress=True, desc=f"val {model_id}")
+            tr = train_one_epoch(
+                model, train_loader, criterion, optimizer, device, use_amp=use_amp, progress=True, desc=f"train {model_id}"
+            )
+            val_stats, val_dice = validate(
+                model, val_loader, criterion, device, progress=True, desc=f"val {model_id}"
+            )
 
             with log_path.open("a", newline="") as f:
                 writer = csv.DictWriter(f, fieldnames=["epoch", "train_loss", "val_loss", "val_dice"])
@@ -324,6 +361,7 @@ def main() -> None:
                         "classes": 1,
                         "model_id": model_id,
                         "patch_size": int(patch_size),
+                        "in_channels": int(in_channels),
                         "fold": int(fold_id),
                         "seed": int(seed),
                     }

@@ -5,6 +5,8 @@ from typing import Any
 
 import numpy as np
 
+from .frequency import compute_fft_mag
+
 
 def to_numpy(array: Any) -> np.ndarray:
     """Convert torch tensors or numpy arrays into numpy arrays."""
@@ -36,10 +38,16 @@ def normalize_image(image: np.ndarray, mean=IMAGENET_MEAN, std=IMAGENET_STD) -> 
         image /= 255.0
     mean = np.array(mean, dtype=np.float32)
     std = np.array(std, dtype=np.float32)
-    return (image - mean) / std
+    if image.ndim != 3:
+        raise ValueError(f"Expected image with shape (H, W, C), got {image.shape}")
+    if image.shape[2] < len(mean):
+        raise ValueError(f"Expected at least {len(mean)} channels, got {image.shape[2]}")
+    out = image.copy()
+    out[..., : len(mean)] = (out[..., : len(mean)] - mean) / std
+    return out
 
 
-TTA_MODES = ("none", "hflip", "vflip", "hvflip", "rot90", "rot180", "rot270")
+TTA_MODES = ("none", "hflip", "vflip", "hvflip", "rot90", "rot180", "rot270", "transpose", "antitranspose")
 
 
 def apply_tta(arr: np.ndarray, mode: str, *, axes: tuple[int, int] = (0, 1)) -> np.ndarray:
@@ -78,6 +86,11 @@ def apply_tta(arr: np.ndarray, mode: str, *, axes: tuple[int, int] = (0, 1)) -> 
         return np.ascontiguousarray(np.rot90(arr, k=2, axes=axes))
     if mode == "rot270":
         return np.ascontiguousarray(np.rot90(arr, k=3, axes=axes))
+    if mode == "transpose":
+        return np.ascontiguousarray(np.swapaxes(arr, ax0, ax1))
+    if mode == "antitranspose":
+        x = np.swapaxes(arr, ax0, ax1)
+        return apply_tta(x, "hvflip", axes=axes)
 
     raise ValueError(f"Invalid TTA mode: {mode!r}. Supported: {', '.join(TTA_MODES)}")
 
@@ -85,15 +98,45 @@ def apply_tta(arr: np.ndarray, mode: str, *, axes: tuple[int, int] = (0, 1)) -> 
 def undo_tta(arr: np.ndarray, mode: str, *, axes: tuple[int, int] = (0, 1)) -> np.ndarray:
     """Undo the augmentation applied by `apply_tta`."""
     mode = str(mode).strip().lower()
-    if mode in {"none", "hflip", "vflip", "hvflip"}:
+    if mode in {"none", "hflip", "vflip", "hvflip", "rot180"}:
         return apply_tta(arr, mode, axes=axes)
     if mode == "rot90":
         return apply_tta(arr, "rot270", axes=axes)
-    if mode == "rot180":
-        return apply_tta(arr, "rot180", axes=axes)
     if mode == "rot270":
         return apply_tta(arr, "rot90", axes=axes)
+    if mode == "transpose":
+        return apply_tta(arr, "transpose", axes=axes)
+    if mode == "antitranspose":
+        return apply_tta(arr, "antitranspose", axes=axes)
     raise ValueError(f"Invalid TTA mode: {mode!r}. Supported: {', '.join(TTA_MODES)}")
+
+
+def _prepare_hwc(
+    image: np.ndarray,
+    *,
+    mean=IMAGENET_MEAN,
+    std=IMAGENET_STD,
+    use_freq_channels: bool,
+) -> np.ndarray:
+    image = np.asarray(image)
+    if image.ndim != 3:
+        raise ValueError(f"Expected image with shape (H, W, C), got {image.shape}")
+    if image.shape[2] < 3:
+        raise ValueError(f"Expected at least 3 channels, got {image.shape[2]}")
+
+    image_f = image.astype(np.float32)
+    if float(image_f.max()) > 1.0:
+        image_f = image_f / 255.0
+
+    if use_freq_channels:
+        fft_mag = compute_fft_mag(image_f).astype(np.float32)
+
+    image_f = normalize_image(image_f, mean=mean, std=std)
+
+    if use_freq_channels:
+        image_f = np.concatenate([image_f, fft_mag], axis=2)
+
+    return image_f
 
 
 def _tile_coords(length: int, tile_size: int, overlap: int) -> list[tuple[int, int]]:
@@ -137,6 +180,7 @@ def predict_image(
     max_size: int = 0,
     mean=IMAGENET_MEAN,
     std=IMAGENET_STD,
+    use_freq_channels: bool = False,
 ) -> np.ndarray:
     import torch
     import torch.nn.functional as F
@@ -154,7 +198,7 @@ def predict_image(
         for y0, y1 in ys:
             for x0, x1 in xs:
                 tile = padded[y0:y1, x0:x1]
-                tile_norm = normalize_image(tile, mean=mean, std=std)
+                tile_norm = _prepare_hwc(tile, mean=mean, std=std, use_freq_channels=bool(use_freq_channels))
                 tile_tensor = torch.from_numpy(tile_norm).permute(2, 0, 1).unsqueeze(0)
                 probs = _predict_tensor(model, tile_tensor, device)
                 prob_tile = probs.squeeze(0).squeeze(0).cpu().numpy()
@@ -164,7 +208,7 @@ def predict_image(
         pred = pred_sum / np.maximum(pred_count, 1.0)
         return pred[:orig_h, :orig_w]
 
-    image_norm = normalize_image(image, mean=mean, std=std)
+    image_norm = _prepare_hwc(image, mean=mean, std=std, use_freq_channels=bool(use_freq_channels))
     tensor = torch.from_numpy(image_norm).permute(2, 0, 1).unsqueeze(0)
     if max_size and max(orig_h, orig_w) > max_size:
         scale = max_size / float(max(orig_h, orig_w))

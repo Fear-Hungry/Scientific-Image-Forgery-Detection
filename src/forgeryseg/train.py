@@ -132,3 +132,45 @@ def validate(
     mean_loss = total_loss / max(len(loader.dataset), 1)
     mean_dice = float(sum(dice_scores) / max(len(dice_scores), 1))
     return TrainStats(loss=mean_loss), mean_dice
+
+
+@torch.no_grad()
+def generate_oof(
+    model,
+    loader,
+    device,
+    save_dir: str | None = None,
+    desc: str = "oof",
+) -> None:
+    """
+    Run inference on loader and save predictions to save_dir (if provided).
+    Predictions are saved as .npy files named after sample.case_id.
+
+    Note: loader dataset must return (images, masks, samples) when return_meta=True.
+    """
+    from pathlib import Path
+    import numpy as np
+
+    model.eval()
+    _ensure_no_empty_parameters(model)
+
+    if save_dir:
+        Path(save_dir).mkdir(parents=True, exist_ok=True)
+
+    for batch in _maybe_tqdm(loader, True, desc):
+        if len(batch) == 3:
+            images, _masks, samples = batch
+        else:
+            print("[WARN] generate_oof: dataset did not return meta (samples). Skipping save.")
+            return
+
+        images = images.to(device)
+        logits = model(images)
+        probs = torch.sigmoid(logits)
+
+        if save_dir:
+            probs_np = probs.cpu().numpy()
+            for i, sample in enumerate(samples):
+                case_id = str(sample.case_id)
+                out_path = Path(save_dir) / f"{case_id}.npy"
+                np.save(out_path, probs_np[i, 0].astype(np.float16))

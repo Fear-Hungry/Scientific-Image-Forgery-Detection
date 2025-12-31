@@ -257,6 +257,24 @@ print("OUTPUTS_ROOT:", OUTPUTS_ROOT)
 #
 # Para treino no Kaggle com Internet ON, o ambiente costuma já ter torch/torchvision.
 # Se faltar algo (ex.: segmentation_models_pytorch), instalamos automaticamente via pip.
+#
+# Nota (Kaggle): o ambiente costuma vir com TensorFlow instalado. Se `protobuf>=5`,
+# alguns imports podem emitir erros do tipo:
+# `AttributeError: 'MessageFactory' object has no attribute 'GetPrototype'`.
+# Para evitar isso, fixamos `protobuf<5` aqui.
+try:
+    import google.protobuf  # type: ignore
+
+    pb_ver = str(getattr(google.protobuf, "__version__", "0.0.0"))
+    pb_major = int(pb_ver.split(".", maxsplit=1)[0])
+except Exception:
+    pb_ver = "unknown"
+    pb_major = 0
+
+if pb_major >= 5:
+    print(f"[pip] protobuf {pb_ver} detectado; ajustando para protobuf<5 (compat Kaggle).")
+    run_cmd([sys.executable, "-m", "pip", "install", "-q", "protobuf<5"])
+
 required = [
     "torch",
     "numpy",
@@ -278,6 +296,8 @@ if missing:
         "sklearn": "scikit-learn",
     }
     pkgs = [module_to_pip[m] for m in missing if m in module_to_pip]
+    # Mantém TensorFlow/Kaggle compatível ao resolver dependências.
+    pkgs.append("protobuf<5")
     if pkgs:
         print("[pip] faltando:", ", ".join(missing))
         run_cmd([sys.executable, "-m", "pip", "install", "-q", *pkgs])

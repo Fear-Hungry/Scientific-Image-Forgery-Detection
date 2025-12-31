@@ -20,5 +20,3 @@ def configure_cache_dirs(cache_root: str | Path | None) -> None:
     os.environ.setdefault("TORCH_HOME", str(root / "torch"))
     os.environ.setdefault("HF_HOME", str(root / "hf"))
     os.environ.setdefault("HUGGINGFACE_HUB_CACHE", str(root / "hf" / "hub"))
-    os.environ.setdefault("TRANSFORMERS_CACHE", str(root / "hf" / "transformers"))
-

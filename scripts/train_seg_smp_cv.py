@@ -161,6 +161,9 @@ def _build_seg_model(cfg: dict) -> nn.Module:
 
 
 def _write_split(path: Path, train_idx: List[int], val_idx: List[int], samples) -> None:
+    # `json.dump` não serializa `numpy.int64` (Kaggle/NumPy), então forçamos `int`.
+    train_idx = [int(i) for i in train_idx]
+    val_idx = [int(i) for i in val_idx]
     payload = {
         "train_idx": train_idx,
         "val_idx": val_idx,

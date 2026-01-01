@@ -12,6 +12,8 @@ dist/
 outputs/
 runs/
 logs/
+weights_cache/hf/
+weights_cache/torch/
 
 # Local datasets
 /data/**

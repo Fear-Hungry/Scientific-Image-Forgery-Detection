@@ -98,7 +98,27 @@ def env_path(name: str) -> Path | None:
 def run_cmd(cmd: list[str], cwd: Path | None = None) -> None:
     cmd_str = " ".join(str(c) for c in cmd)
     print("[cmd]", cmd_str)
-    subprocess.run(cmd, check=True, cwd=str(cwd) if cwd else None)
+    proc = subprocess.Popen(
+        [str(c) for c in cmd],
+        cwd=str(cwd) if cwd else None,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
+    )
+    assert proc.stdout is not None
+
+    tail: list[str] = []
+    tail_limit = 200
+    for line in proc.stdout:
+        print(line, end="")
+        tail.append(line)
+        if len(tail) > tail_limit:
+            tail = tail[-tail_limit:]
+
+    rc = proc.wait()
+    if rc != 0:
+        raise subprocess.CalledProcessError(rc, cmd, output="".join(tail))
 
 
 def find_repo_root() -> Path | None:

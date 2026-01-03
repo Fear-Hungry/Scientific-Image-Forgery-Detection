@@ -375,17 +375,24 @@ def build_deeplabv3plus(
     decoder_channels = _as_positive_int(decoder_channels, name="decoder_channels")
     in_channels = _as_positive_int(in_channels, name="in_channels")
     classes = _as_positive_int(classes, name="classes")
+    # Avoid leaking atrous rate kwargs into SMP's `get_encoder(**kwargs)` call.
+    # Be strict: callers must use the `atrous_rates=` argument of this function.
+    if "decoder_atrous_rates" in kwargs:
+        raise TypeError("build_deeplabv3plus() got an unexpected keyword argument 'decoder_atrous_rates' (use atrous_rates=...)")
     atrous_rates = _as_positive_int_sequence(atrous_rates, name="atrous_rates")
-    return _safe_init(
-        smp.DeepLabV3Plus,
+    common_kwargs = dict(
         encoder_name=encoder_name,
         encoder_depth=encoder_depth,
         decoder_channels=decoder_channels,
-        atrous_rates=atrous_rates,
         in_channels=in_channels,
         classes=classes,
         activation=None,
+        **kwargs,
+    )
+    return _safe_init(
+        smp.DeepLabV3Plus,
+        decoder_atrous_rates=atrous_rates,
         strict_weights=strict_weights,
         encoder_weights=encoder_weights,
-        **kwargs,
+        **common_kwargs,
     )

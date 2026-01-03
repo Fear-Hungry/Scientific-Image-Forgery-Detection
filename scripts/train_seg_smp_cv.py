@@ -22,6 +22,7 @@ from forgeryseg.augment import get_train_augment, get_val_augment
 from forgeryseg.dataset import PatchDataset, build_supplemental_index, build_train_index
 from forgeryseg.losses import BCEDiceLoss, BCETverskyLoss
 from forgeryseg.models import builders, dinov2
+from forgeryseg.models.correlation import CorrelationConfig, SmpCorrelationWrapper
 from forgeryseg.models.hybrid import build_hybrid_model
 from forgeryseg.offline import configure_cache_dirs
 from forgeryseg.train import train_one_epoch, validate
@@ -143,7 +144,7 @@ def _build_seg_model(cfg: dict) -> nn.Module:
         )
 
     if backend in {"dinov2", "hf"}:
-        model_id = str(cfg.get("hf_model_id", cfg.get("encoder_name", "metaresearch/dinov2")))
+        model_id = str(cfg.get("hf_model_id", cfg.get("encoder_name", "facebook/dinov2-base")))
         return dinov2.build_dinov2_segmenter(
             model_id=model_id,
             decoder_channels=cfg.get("decoder_channels", (256, 128, 64)),
@@ -314,6 +315,15 @@ def main() -> None:
             model_cfg["arch"] = "dinov2"
 
         model = _build_seg_model(model_cfg).to(device)
+
+        if bool(model_cfg.get("use_correlation", False)):
+            print(f"[SEG {model_id}] Activating Self-Correlation module.")
+            corr_cfg = CorrelationConfig(
+                feature_index=int(model_cfg.get("correlation_feature_index", -1)),
+                embed_channels=int(model_cfg.get("correlation_embed_channels", 0)) or None,
+                max_tokens=int(model_cfg.get("correlation_max_tokens", 256)),
+            )
+            model = SmpCorrelationWrapper(model, config=corr_cfg).to(device)
 
         optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
 

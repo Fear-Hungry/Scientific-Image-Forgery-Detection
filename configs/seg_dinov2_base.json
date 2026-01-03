@@ -2,7 +2,7 @@
   "model_id": "dinov2_base_light",
   "backend": "dinov2",
   "arch": "dinov2",
-  "hf_model_id": "metaresearch/dinov2",
+  "hf_model_id": "facebook/dinov2-base",
   "pretrained": true,
   "freeze_encoder": true,
   "decoder_channels": [

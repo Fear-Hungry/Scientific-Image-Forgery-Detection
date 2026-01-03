@@ -23,6 +23,25 @@ def test_smp_wrapper_forward_shape():
     assert tuple(y.shape) == (2, 1, 64, 64)
 
 
+def test_smp_wrapper_state_dict_roundtrip_strict():
+    smp = pytest.importorskip("segmentation_models_pytorch")
+
+    base1 = smp.Unet(encoder_name="resnet18", encoder_weights=None, in_channels=3, classes=1, activation=None)
+    wrapped1 = SmpCorrelationWrapper(base1, CorrelationConfig(feature_index=-1, max_tokens=256))
+
+    x = torch.randn(1, 3, 64, 64)
+    y1 = wrapped1(x)
+    state = wrapped1.state_dict()
+
+    base2 = smp.Unet(encoder_name="resnet18", encoder_weights=None, in_channels=3, classes=1, activation=None)
+    wrapped2 = SmpCorrelationWrapper(base2, CorrelationConfig(feature_index=-1, max_tokens=256))
+    wrapped2.load_state_dict(state)
+    y2 = wrapped2(x)
+
+    assert tuple(y2.shape) == tuple(y1.shape)
+    assert torch.allclose(y2, y1)
+
+
 def test_segmentation_ensemble_logits_and_probs_shapes():
     smp = pytest.importorskip("segmentation_models_pytorch")
     m1 = smp.Unet(encoder_name="resnet18", encoder_weights=None, in_channels=3, classes=1, activation=None)

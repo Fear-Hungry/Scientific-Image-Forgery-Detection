@@ -99,6 +99,36 @@ class SmpCorrelationWrapper(nn.Module):
             raise TypeError("Expected a segmentation_models_pytorch model with encoder/decoder/segmentation_head")
 
         self.corr: Optional[SelfCorrelationBlock] = None
+        inferred_channels = self._infer_corr_in_channels()
+        if inferred_channels is not None:
+            self.corr = SelfCorrelationBlock(
+                in_channels=inferred_channels,
+                embed_channels=self.config.embed_channels,
+                max_tokens=self.config.max_tokens,
+            )
+
+    def _resolve_feature_index(self, n_features: int) -> int:
+        idx = int(self.config.feature_index)
+        if idx < 0:
+            idx = n_features + idx
+        if idx < 0 or idx >= n_features:
+            raise IndexError(f"feature_index out of range: {self.config.feature_index}")
+        return idx
+
+    def _infer_corr_in_channels(self) -> int | None:
+        out_channels = getattr(self.model.encoder, "out_channels", None)
+        if not isinstance(out_channels, (list, tuple)) or not out_channels:
+            return None
+
+        try:
+            idx = self._resolve_feature_index(len(out_channels))
+        except Exception:
+            return None
+
+        try:
+            return int(out_channels[idx])
+        except Exception:
+            return None
 
     def _get_corr(self, feature: torch.Tensor) -> SelfCorrelationBlock:
         if self.corr is None:
@@ -109,16 +139,26 @@ class SmpCorrelationWrapper(nn.Module):
             )
         return self.corr
 
+    def load_state_dict(self, state_dict, strict: bool = True):  # type: ignore[override]
+        if self.corr is None:
+            qkv_weight = state_dict.get("corr.qkv.weight")
+            if isinstance(qkv_weight, torch.Tensor) and qkv_weight.ndim >= 2:
+                in_channels = int(qkv_weight.shape[1])
+                out_channels = int(qkv_weight.shape[0])
+                embed_channels = (out_channels // 3) if (out_channels % 3 == 0) else None
+                self.corr = SelfCorrelationBlock(
+                    in_channels=in_channels,
+                    embed_channels=embed_channels,
+                    max_tokens=self.config.max_tokens,
+                )
+        return super().load_state_dict(state_dict, strict=strict)
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         if hasattr(self.model, "check_input_shape"):
             self.model.check_input_shape(x)
 
         features = list(self.model.encoder(x))
-        idx = self.config.feature_index
-        if idx < 0:
-            idx = len(features) + idx
-        if idx < 0 or idx >= len(features):
-            raise IndexError(f"feature_index out of range: {self.config.feature_index}")
+        idx = self._resolve_feature_index(len(features))
 
         feature = features[idx]
         if feature.numel() > 0:
@@ -127,4 +167,3 @@ class SmpCorrelationWrapper(nn.Module):
         decoder_output = self.model.decoder(features)
         masks = self.model.segmentation_head(decoder_output)
         return masks
-

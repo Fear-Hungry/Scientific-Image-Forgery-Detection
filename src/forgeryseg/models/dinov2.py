@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Sequence
 
 import torch
@@ -71,6 +72,29 @@ def _parse_torch_dtype(value: object) -> torch.dtype | None:
     raise TypeError(f"torch_dtype must be torch.dtype or str, got {type(value).__name__}")
 
 
+def _normalize_model_id(model_id: str) -> str:
+    """Normalize common/legacy DINOv2 identifiers to valid Hugging Face model ids.
+
+    If `model_id` points to an existing local path, it is returned unchanged.
+    """
+    model_id = str(model_id).strip()
+    if not model_id:
+        return model_id
+
+    try:
+        if Path(model_id).exists():
+            return model_id
+    except OSError:
+        return model_id
+
+    aliases = {
+        "dinov2": "facebook/dinov2-base",
+        "metaresearch/dinov2": "facebook/dinov2-base",
+        "facebookresearch/dinov2": "facebook/dinov2-base",
+    }
+    return aliases.get(model_id, model_id)
+
+
 def _resolve_patch_size(model: nn.Module) -> int:
     patch_size = None
     config = getattr(model, "config", None)
@@ -137,6 +161,7 @@ def _load_encoder(
     torch_dtype: torch.dtype | None,
 ) -> nn.Module:
     _require_transformers()
+    model_id = _normalize_model_id(model_id)
     if pretrained:
         return AutoModel.from_pretrained(
             model_id,
@@ -196,7 +221,7 @@ class _DinoV2Base(nn.Module):
         torch_dtype: torch.dtype | None,
     ) -> None:
         super().__init__()
-        self.model_id = str(model_id)
+        self.model_id = _normalize_model_id(str(model_id))
         self.freeze_encoder = bool(freeze_encoder)
         self.encoder = _load_encoder(
             self.model_id,
@@ -411,7 +436,7 @@ class DinoSeg(nn.Module):
     ) -> None:
         super().__init__()
         _require_image_processor()
-        self.dino_path = str(dino_path)
+        self.dino_path = _normalize_model_id(str(dino_path))
         self.freeze_encoder = bool(freeze_encoder)
 
         self.processor = AutoImageProcessor.from_pretrained(  # type: ignore[misc]

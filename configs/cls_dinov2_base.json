@@ -2,7 +2,7 @@
   "model_id": "cls_dinov2_base",
   "backend": "dinov2",
   "model_name": "dinov2",
-  "hf_model_id": "metaresearch/dinov2",
+  "hf_model_id": "facebook/dinov2-base",
   "image_size": 392,
   "batch_size": 16,
   "epochs": 10,

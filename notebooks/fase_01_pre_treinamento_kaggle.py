@@ -511,6 +511,7 @@ SEG_CONFIGS = [
     REPO_ROOT / "configs" / "seg_segformer_mit_b2.json",
     REPO_ROOT / "configs" / "seg_dinov2_base.json",
     REPO_ROOT / "configs" / "seg_dinov2_base_640.json",
+    REPO_ROOT / "configs" / "seg_hero_effnet_b7.json",
 ]
 for p in SEG_CONFIGS:
     if not p.exists():

@@ -8,6 +8,7 @@ from torch import nn
 
 from .models import builders, dinov2
 from .models.classifier import build_classifier
+from .models.correlation import CorrelationConfig, SmpCorrelationWrapper
 
 
 def load_checkpoint(path: str | Path) -> tuple[dict, dict]:
@@ -37,8 +38,9 @@ def build_segmentation_from_config(cfg: dict[str, Any]) -> nn.Module:
         encoder_name = str(cfg.get("encoder_name", "efficientnet-b4"))
         encoder_depth = int(cfg.get("encoder_depth", 5))
 
+        model = None
         if arch in {"unetplusplus", "unetpp"}:
-            return builders.build_unetplusplus(
+            model = builders.build_unetplusplus(
                 encoder_name=encoder_name,
                 encoder_weights=None,
                 encoder_depth=encoder_depth,
@@ -46,8 +48,8 @@ def build_segmentation_from_config(cfg: dict[str, Any]) -> nn.Module:
                 classes=classes,
                 strict_weights=True,
             )
-        if arch == "unet":
-            return builders.build_unet(
+        elif arch == "unet":
+            model = builders.build_unet(
                 encoder_name=encoder_name,
                 encoder_weights=None,
                 encoder_depth=encoder_depth,
@@ -55,8 +57,8 @@ def build_segmentation_from_config(cfg: dict[str, Any]) -> nn.Module:
                 classes=classes,
                 strict_weights=True,
             )
-        if arch in {"deeplabv3plus", "deeplabv3+", "deeplabv3p"}:
-            return builders.build_deeplabv3plus(
+        elif arch in {"deeplabv3plus", "deeplabv3+", "deeplabv3p"}:
+            model = builders.build_deeplabv3plus(
                 encoder_name=encoder_name,
                 encoder_weights=None,
                 encoder_depth=encoder_depth,
@@ -64,17 +66,26 @@ def build_segmentation_from_config(cfg: dict[str, Any]) -> nn.Module:
                 classes=classes,
                 strict_weights=True,
             )
-        if arch in {"segformer", "mit"}:
-            encoder_name = str(cfg.get("encoder_name", cfg.get("segformer_encoder", "mit_b2")))
-            return builders.build_segformer(
-                encoder_name=encoder_name,
+        elif arch in {"segformer", "mit"}:
+            enc_name = str(cfg.get("encoder_name", cfg.get("segformer_encoder", "mit_b2")))
+            model = builders.build_segformer(
+                encoder_name=enc_name,
                 encoder_weights=None,
                 in_channels=in_channels,
                 classes=classes,
                 strict_weights=True,
             )
+        else:
+            raise ValueError(f"Unknown SMP segmentation arch: {arch!r}")
 
-        raise ValueError(f"Unknown SMP segmentation arch: {arch!r}")
+        if bool(cfg.get("use_correlation", False)):
+            corr_cfg = CorrelationConfig(
+                feature_index=int(cfg.get("correlation_feature_index", -1)),
+                embed_channels=int(cfg.get("correlation_embed_channels", 0)) or None,
+                max_tokens=int(cfg.get("correlation_max_tokens", 256)),
+            )
+            model = SmpCorrelationWrapper(model, config=corr_cfg)
+        return model
 
     if backend == "hybrid" or arch == "hybrid":
         from .models.hybrid import build_hybrid_model
@@ -100,7 +111,7 @@ def build_segmentation_from_config(cfg: dict[str, Any]) -> nn.Module:
         model_id = str(
             cfg.get(
                 "hf_model_id",
-                cfg.get("encoder_name", cfg.get("model_name", "metaresearch/dinov2")),
+                cfg.get("encoder_name", cfg.get("model_name", "facebook/dinov2-base")),
             )
         )
         return dinov2.build_dinov2_segmenter(

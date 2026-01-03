@@ -550,13 +550,15 @@ for base_cfg in SEG_CONFIGS:
     )
 
     # + FFT channels (4ch) (experimento agressivo: pode melhorar copy-move)
-    seg_experiments_all.append(
-        SegExperiment(
-            name=f"{mid}_fft",
-            base_config=base_cfg,
-            overrides={"model_id": f"{mid}_fft", "use_freq_channels": True},
+    already_has_extra_channels = bool(base.get("use_freq_channels", False)) or int(base.get("in_channels", 3)) != 3
+    if not already_has_extra_channels:
+        seg_experiments_all.append(
+            SegExperiment(
+                name=f"{mid}_fft",
+                base_config=base_cfg,
+                overrides={"model_id": f"{mid}_fft", "use_freq_channels": True},
+            )
         )
-    )
 
     # + BCE+Dice (às vezes melhora componentes pequenas)
     if str(base.get("backend", "smp")).lower() in {"smp", ""}:
@@ -645,6 +647,15 @@ if RUN_CLS_EXPERIMENTS and not cls_experiments:
 
 print(f"Seg experiments (all): {len(seg_experiments_all)} | active={len(seg_experiments)} | level={SEG_LEVEL} filter={SEG_FILTER!r}")
 print(f"Cls experiments (all): {len(cls_experiments_all)} | active={len(cls_experiments)} | CLS_ACTIVE={CLS_ACTIVE!r}")
+folds_to_run = _folds_to_run(N_FOLDS, FOLD)
+if RUN_SEG_EXPERIMENTS:
+    seg_runs = int(len(seg_experiments) * len(folds_to_run))
+    print(f"[plan] SEG: {len(seg_experiments)} experimento(s) x {len(folds_to_run)} fold(s) = {seg_runs} treino(s)")
+    if not DRY_RUN and seg_runs >= 6:
+        print("[WARN] Muitos treinos de segmentação selecionados; considere usar FORGERYSEG_SEG_FILTER='hero' (ou outro filtro).")
+if RUN_CLS_EXPERIMENTS:
+    cls_runs = int(len(cls_experiments) * len(folds_to_run))
+    print(f"[plan] CLS: {len(cls_experiments)} experimento(s) x {len(folds_to_run)} fold(s) = {cls_runs} treino(s)")
 
 
 # %%
@@ -816,6 +827,8 @@ def _train_seg(exp: SegExperiment) -> None:
         cmd += ["--fold", str(FOLD)]
     if exp.include_supplemental or bool(cfg.get("include_supplemental", False)):
         cmd += ["--include-supplemental"]
+    if SKIP_EXISTING:
+        cmd += ["--skip-existing"]
     if CACHE_ROOT is not None:
         cmd += ["--cache-root", str(CACHE_ROOT)]
 
@@ -871,6 +884,8 @@ def _train_cls(exp: ClsExperiment) -> None:
         cmd += ["--fold", str(FOLD)]
     if exp.include_supplemental or bool(cfg.get("include_supplemental", False)):
         cmd += ["--include-supplemental"]
+    if SKIP_EXISTING:
+        cmd += ["--skip-existing"]
     if CACHE_ROOT is not None:
         cmd += ["--cache-root", str(CACHE_ROOT)]
 

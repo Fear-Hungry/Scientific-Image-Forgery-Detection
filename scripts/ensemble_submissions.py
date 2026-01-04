@@ -10,8 +10,8 @@ from pathlib import Path
 import pandas as pd
 from tqdm import tqdm
 
-from forgeryseg.dataset import list_cases
 from forgeryseg.ensemble import ensemble_annotations, rank_weights_by_score
+from forgeryseg.submission import list_ordered_cases
 
 
 @dataclass(frozen=True)
@@ -52,7 +52,7 @@ def main() -> None:
             weights = rank_weights_by_score([float(s.score) for s in subs])
         print(f"weights={weights}")
 
-    cases = list_cases(args.data_root, args.split, include_authentic=True, include_forged=True)
+    cases = list_ordered_cases(args.data_root, args.split)
     rows: list[dict[str, str]] = []
     for case in tqdm(cases, desc="Ensemble"):
         import cv2

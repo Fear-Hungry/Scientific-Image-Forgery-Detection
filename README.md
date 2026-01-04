@@ -6,6 +6,21 @@ Os dados **não são versionados** aqui: o projeto espera o layout do Kaggle em 
 - Página oficial: https://www.kaggle.com/competitions/recodai-luc-scientific-image-forgery-detection
 - Métrica oficial (código + RLE): https://www.kaggle.com/code/metric/recodai-f1
 
+## Quickstart
+
+**Local (requer dados em `data/recodai` + checkpoints em `outputs/models/`):**
+
+```bash
+pip install -r requirements.txt
+kaggle competitions download -c recodai-luc-scientific-image-forgery-detection -p data && unzip -q data/recodai-luc-scientific-image-forgery-detection.zip -d data/recodai
+python scripts/predict_submission.py --config configs/dino_v3_518_r69_fft_gate.json --data-root data/recodai --split test --out outputs/submission.csv
+```
+
+**Kaggle (internet OFF):**
+
+- Rode `notebooks/fase_00_submissao_kaggle.ipynb` (anexe o dataset da competição + um dataset com este repo + um dataset com `outputs/models/*.pth`).
+- Saída: `/kaggle/working/submission.csv`
+
 ## Sumário
 
 - [Visão geral](#visão-geral)
@@ -25,6 +40,7 @@ Os dados **não são versionados** aqui: o projeto espera o layout do Kaggle em 
 - [Como baixar os dados via Kaggle API](#como-baixar-os-dados-via-kaggle-api)
 - [Dicas práticas (baseline e armadilhas comuns)](#dicas-práticas-baseline-e-armadilhas-comuns)
 - [Pipeline (DINOv2 + CNN) — scripts deste repo](#pipeline-dinov2--cnn--scripts-deste-repo)
+- [Licença](#licença)
 
 ## Visão geral
 
@@ -267,6 +283,7 @@ Configurações prontas em `configs/` e CLIs em `scripts/`:
   - `python scripts/train_dino_decoder.py --config configs/dino_v3_518_r69.json --data-root data/recodai --out outputs/models/r69.pth --epochs 5`
 
 Os caminhos de checkpoints em `configs/*.json` (ex.: `outputs/models/r69.pth`) **devem existir** no ambiente de execução (ex.: anexando um Kaggle Dataset com `outputs/models/`).
+Veja `docs/MODEL_ZOO.md` para o layout esperado de `outputs/models/`.
 
 ### FFT como sinal complementar (opcional)
 
@@ -286,3 +303,8 @@ Além do *gate* (classificador), existe um modelo `dinov2_freq_fusion` que extra
 - `python scripts/predict_submission.py --config configs/dino_v3_518_r69_freq_fusion.json --data-root data/recodai --split test --out outputs/submission_freq_fusion.csv`
 
 Modos suportados em `freq_fusion.mode`: `logmag`, `hp_residual`, `phase_only`, `lp_hp`.
+
+## Licença
+
+- Código: MIT (veja `LICENSE`).
+- Dados: devem ser obtidos via Kaggle e seguem os termos/regras da competição (não são redistribuídos neste repositório).

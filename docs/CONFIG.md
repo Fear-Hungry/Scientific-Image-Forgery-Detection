@@ -47,7 +47,9 @@ Usada por:
     "weight_decay": 0.0001,
     "folds": 1,
     "aug": "basic",
-    "scheduler": "none"
+    "scheduler": "none",
+    "patience": 3,
+    "min_delta": 0.0
   }
 }
 ```
@@ -97,3 +99,11 @@ Exemplos:
 
 Valores são parseados como JSON quando possível (`true/false`, números, listas).
 
+## 4) Logs de treino (CSV/JSON)
+
+O `Trainer` grava logs por fold ao lado do `--out`:
+
+- `outputs/models/r69_fold0.csv` (métricas por época)
+- `outputs/models/r69_fold0.json` (histórico + resumo do fold)
+
+E imprime no final a média dos melhores scores entre folds.

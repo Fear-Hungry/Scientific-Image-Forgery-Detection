@@ -309,6 +309,8 @@ class SegmentationTrainConfig:
     lr_min: float = 1e-6
     max_lr: float = 0.0
     pct_start: float = 0.1
+    patience: int = 3
+    min_delta: float = 0.0
 
     @classmethod
     def from_dict(cls, d: dict[str, Any] | None) -> SegmentationTrainConfig:
@@ -328,6 +330,8 @@ class SegmentationTrainConfig:
             lr_min=float(d.get("lr_min", cls.lr_min)),
             max_lr=float(d.get("max_lr", cls.max_lr)),
             pct_start=float(d.get("pct_start", cls.pct_start)),
+            patience=int(d.get("patience", cls.patience)),
+            min_delta=float(d.get("min_delta", cls.min_delta)),
         )
 
 

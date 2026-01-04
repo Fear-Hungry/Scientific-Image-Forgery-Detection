@@ -16,6 +16,7 @@ class RecodaiSample(NamedTuple):
     image: torch.Tensor  # (3, H, W), float32 in [0, 1]
     mask: torch.Tensor  # (1, H, W), float32 in {0, 1}
     is_forged: bool
+    mask_path: Path | None
 
 
 def list_cases(
@@ -78,13 +79,17 @@ class RecodaiDataset(Dataset[RecodaiSample]):
         data_root: Pathish,
         split: Split,
         *,
+        training: bool | None = None,
         include_authentic: bool = True,
         include_forged: bool = True,
         transforms: Callable[[np.ndarray, np.ndarray], tuple[np.ndarray, np.ndarray]] | None = None,
         image_mode: Literal["rgb", "l"] = "rgb",
+        cache_images: bool = False,
+        cache_masks: bool = False,
     ) -> None:
         self.data_root = Path(data_root)
         self.split = split
+        self.training = bool(training) if training is not None else split in {"train", "supplemental"}
         self.cases = list_cases(
             self.data_root,
             split,
@@ -93,29 +98,52 @@ class RecodaiDataset(Dataset[RecodaiSample]):
         )
         self.transforms = transforms
         self.image_mode = image_mode
+        self.cache_images = bool(cache_images)
+        self.cache_masks = bool(cache_masks)
+
+        self._image_cache: dict[str, np.ndarray] = {}
+        self._mask_cache: dict[str, np.ndarray] = {}
 
     def __len__(self) -> int:
         return len(self.cases)
 
     def __getitem__(self, idx: int) -> RecodaiSample:
         case = self.cases[idx]
-        with Image.open(case.image_path) as img:
-            img = img.convert("RGB" if self.image_mode == "rgb" else "L")
-            image = np.array(img)
+        if self.cache_images and case.case_id in self._image_cache:
+            image = self._image_cache[case.case_id]
+        else:
+            with Image.open(case.image_path) as img:
+                img = img.convert("RGB" if self.image_mode == "rgb" else "L")
+                image = np.array(img)
+            if self.cache_images:
+                self._image_cache[case.case_id] = image
         if self.image_mode == "l":
             image = np.repeat(image[..., None], 3, axis=2)
 
-        if case.mask_path is None:
+        is_forged = case.mask_path is not None
+
+        if not self.training:
             mask = np.zeros(image.shape[:2], dtype=np.uint8)
-            is_forged = False
+        elif case.mask_path is None:
+            mask = np.zeros(image.shape[:2], dtype=np.uint8)
         else:
-            instances = load_mask_instances(case.mask_path)
-            mask = union_mask(instances, shape=image.shape[:2])
-            is_forged = True
+            if self.cache_masks and case.case_id in self._mask_cache:
+                mask = self._mask_cache[case.case_id]
+            else:
+                instances = load_mask_instances(case.mask_path)
+                mask = union_mask(instances, shape=image.shape[:2])
+                if self.cache_masks:
+                    self._mask_cache[case.case_id] = mask
 
         if self.transforms is not None:
             image, mask = self.transforms(image, mask)
 
         image_t = torch.from_numpy(image).permute(2, 0, 1).contiguous().float() / 255.0
         mask_t = torch.from_numpy(mask[None, ...].astype(np.float32)).contiguous()
-        return RecodaiSample(case_id=case.case_id, image=image_t, mask=mask_t, is_forged=is_forged)
+        return RecodaiSample(
+            case_id=case.case_id,
+            image=image_t,
+            mask=mask_t,
+            is_forged=is_forged,
+            mask_path=case.mask_path,
+        )

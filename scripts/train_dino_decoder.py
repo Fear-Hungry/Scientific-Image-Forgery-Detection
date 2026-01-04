@@ -14,6 +14,7 @@ def main() -> None:
     ap.add_argument("--config", type=Path, required=True)
     ap.add_argument("--data-root", type=Path, required=True)
     ap.add_argument("--out", type=Path, required=True)
+    ap.add_argument("--split", choices=["train", "supplemental"], default="train")
     ap.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
     ap.add_argument("--epochs", type=int, default=None)
     ap.add_argument("--batch-size", type=int, default=None)
@@ -29,6 +30,8 @@ def main() -> None:
     ap.add_argument("--lr-min", type=float, default=None)
     ap.add_argument("--max-lr", type=float, default=None)
     ap.add_argument("--pct-start", type=float, default=None)
+    ap.add_argument("--patience", type=int, default=None, help="Early stopping patience (val_of1).")
+    ap.add_argument("--min-delta", type=float, default=None, help="Min delta for val_of1 improvement.")
     ap.add_argument(
         "--set",
         dest="overrides",
@@ -43,6 +46,7 @@ def main() -> None:
         data_root=args.data_root,
         out_path=args.out,
         device=args.device,
+        split=args.split,  # type: ignore[arg-type]
         overrides=list(args.overrides) if args.overrides else None,
         epochs=args.epochs,
         batch_size=args.batch_size,
@@ -58,6 +62,8 @@ def main() -> None:
         lr_min=args.lr_min,
         max_lr=args.max_lr,
         pct_start=args.pct_start,
+        patience=args.patience,
+        min_delta=args.min_delta,
     )
 
 

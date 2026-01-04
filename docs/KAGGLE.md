@@ -57,12 +57,14 @@ Opções úteis:
 
 - `--folds 5` (k-fold estratificado). Saída vira `..._fold0.pth`, `..._fold1.pth`, etc.
 - `--scheduler cosine` (ou `onecycle`) para melhorar convergência.
+- `--patience 3` para early stopping baseado em `val_of1` (oF1).
 - Segmentação: `--aug robust` para aumentar robustez (rotações/escala leve, blur e ruído).
 
 Notas:
 
 - Nos configs DINOv2, `encoder.pretrained=true` é usado **só no treino** (para baixar pesos do timm); na inferência, o código ignora isso quando existe `checkpoint` do modelo completo.
 - Para rodar a submissão sem internet, coloque os `.pth` em um Kaggle Dataset e anexe ao notebook final.
+- Logs por fold (CSV/JSON) são gravados ao lado do `--out` (ver `docs/CONFIG.md`).
 
 ## 4) Empacotar para Kaggle Dataset (local)
 

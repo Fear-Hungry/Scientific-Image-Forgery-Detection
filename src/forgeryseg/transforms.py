@@ -1,11 +1,27 @@
 from __future__ import annotations
 
+import inspect
 from typing import Callable, Literal
 
 import numpy as np
 
 AugMode = Literal["none", "basic", "robust"]
 TransformFn = Callable[[np.ndarray, np.ndarray], tuple[np.ndarray, np.ndarray]]
+
+
+def _safe_gauss_noise(*, A, p: float):
+    """
+    Albumentations 1.x used `var_limit`, 2.x uses `std_range` (fraction of max value).
+    We keep a comparable noise magnitude across versions.
+    """
+    params = inspect.signature(A.GaussNoise).parameters
+    if "std_range" in params:
+        # Previous var_limit=(10,50) => sigma ~ (sqrt(10), sqrt(50)) on uint8 scale.
+        # Albumentations 2.x expects std as a fraction of max value (255 for uint8).
+        return A.GaussNoise(std_range=(0.012, 0.028), mean_range=(0.0, 0.0), p=float(p))
+    if "var_limit" in params:
+        return A.GaussNoise(var_limit=(10.0, 50.0), p=float(p))
+    return A.GaussNoise(p=float(p))
 
 
 def make_transforms(input_size: int, *, train: bool, aug: AugMode) -> TransformFn:
@@ -41,12 +57,24 @@ def make_transforms(input_size: int, *, train: bool, aug: AugMode) -> TransformF
         if aug == "robust":
             base.extend(
                 [
-                    A.ShiftScaleRotate(
-                        shift_limit=0.05,
-                        scale_limit=0.15,
-                        rotate_limit=15,
-                        border_mode=cv2.BORDER_REFLECT_101,
-                        p=0.5,
+                    # Albumentations 2.x warns that ShiftScaleRotate is a special case of Affine.
+                    # Keep compatibility with older versions by falling back when needed.
+                    (
+                        A.Affine(
+                            scale=(0.85, 1.15),
+                            translate_percent=(-0.05, 0.05),
+                            rotate=(-15, 15),
+                            border_mode=cv2.BORDER_REFLECT_101,
+                            p=0.5,
+                        )
+                        if hasattr(A, "Affine")
+                        else A.ShiftScaleRotate(
+                            shift_limit=0.05,
+                            scale_limit=0.15,
+                            rotate_limit=15,
+                            border_mode=cv2.BORDER_REFLECT_101,
+                            p=0.5,
+                        )
                     ),
                     A.OneOf(
                         [
@@ -55,7 +83,7 @@ def make_transforms(input_size: int, *, train: bool, aug: AugMode) -> TransformF
                         ],
                         p=0.2,
                     ),
-                    A.GaussNoise(var_limit=(10.0, 50.0), p=0.2),
+                    _safe_gauss_noise(A=A, p=0.2),
                 ]
             )
 

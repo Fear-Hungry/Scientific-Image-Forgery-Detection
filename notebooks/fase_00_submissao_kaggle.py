@@ -94,7 +94,7 @@ from forgeryseg.checkpoint import load_flexible_state_dict
 from forgeryseg.dataset import list_cases
 from forgeryseg.ensemble import ensemble_annotations, rank_weights_by_score
 from forgeryseg.frequency import FFTParams, fft_tensor
-from forgeryseg.inference import default_tta, load_rgb, predict_prob_map
+from forgeryseg.inference import TilingParams, default_tta, load_rgb, predict_prob_map, predict_prob_map_tiled
 from forgeryseg.models.dinov2_decoder import DinoV2EncoderSpec, DinoV2SegmentationModel
 from forgeryseg.models.dinov2_freq_fusion import DinoV2FreqFusionSegmentationModel, FreqFusionSpec
 from forgeryseg.models.fft_classifier import FFTClassifier
@@ -270,6 +270,16 @@ def predict_submission_for_config(
         zoom_scale=float(tta_cfg.get("zoom_scale", 0.9)),
         weights=tuple(tta_cfg.get("weights", [0.5, 0.25, 0.25])),
     )
+    tiling_cfg = cfg.get("tiling", {})
+    tiling: TilingParams | None = None
+    if isinstance(tiling_cfg, dict):
+        tile_size = int(tiling_cfg.get("tile_size", 0))
+        if tile_size > 0:
+            tiling = TilingParams(
+                tile_size=tile_size,
+                overlap=int(tiling_cfg.get("overlap", 0)),
+                batch_size=int(tiling_cfg.get("batch_size", 4)),
+            )
 
     model = _load_segmentation_model(cfg, device=device)
     fft_gate = _load_fft_gate(cfg, device=device)
@@ -303,14 +313,25 @@ def predict_submission_for_config(
     for case in tqdm(ordered, desc=f"Predict ({config_path.name})"):
         image = load_rgb(case.image_path)
 
-        prob = predict_prob_map(
-            model,
-            image,
-            input_size=input_size,
-            device=device,
-            tta_transforms=tta_transforms,
-            tta_weights=tta_weights,
-        )
+        if tiling is None:
+            prob = predict_prob_map(
+                model,
+                image,
+                input_size=input_size,
+                device=device,
+                tta_transforms=tta_transforms,
+                tta_weights=tta_weights,
+            )
+        else:
+            prob = predict_prob_map_tiled(
+                model,
+                image,
+                input_size=input_size,
+                device=device,
+                tiling=tiling,
+                tta_transforms=tta_transforms,
+                tta_weights=tta_weights,
+            )
         instances = postprocess_prob(prob, post)
         ann = masks_to_annotation(instances)
 

@@ -14,7 +14,7 @@ from tqdm import tqdm
 from forgeryseg.checkpoint import load_flexible_state_dict
 from forgeryseg.dataset import list_cases
 from forgeryseg.frequency import FFTParams, fft_tensor
-from forgeryseg.inference import default_tta, load_rgb, predict_prob_map
+from forgeryseg.inference import TilingParams, default_tta, load_rgb, predict_prob_map, predict_prob_map_tiled
 from forgeryseg.models.fft_classifier import FFTClassifier
 from forgeryseg.models.dinov2_decoder import DinoV2EncoderSpec, DinoV2SegmentationModel
 from forgeryseg.models.dinov2_freq_fusion import DinoV2FreqFusionSegmentationModel, FreqFusionSpec
@@ -95,6 +95,16 @@ def main() -> None:
         zoom_scale=float(tta_cfg.get("zoom_scale", 0.9)),
         weights=tuple(tta_cfg.get("weights", [0.5, 0.25, 0.25])),
     )
+    tiling_cfg = cfg.get("tiling", {})
+    tiling: TilingParams | None = None
+    if isinstance(tiling_cfg, dict):
+        tile_size = int(tiling_cfg.get("tile_size", 0))
+        if tile_size > 0:
+            tiling = TilingParams(
+                tile_size=tile_size,
+                overlap=int(tiling_cfg.get("overlap", 0)),
+                batch_size=int(tiling_cfg.get("batch_size", 4)),
+            )
     post = PostprocessParams(**cfg.get("postprocess", {}))
     device = torch.device(args.device)
     if fft_model is not None:
@@ -110,14 +120,25 @@ def main() -> None:
     for case in tqdm(cases, desc="Predict"):
         image = load_rgb(case.image_path)
 
-        prob = predict_prob_map(
-            model,
-            image,
-            input_size=input_size,
-            device=device,
-            tta_transforms=tta_transforms,
-            tta_weights=tta_weights,
-        )
+        if tiling is None:
+            prob = predict_prob_map(
+                model,
+                image,
+                input_size=input_size,
+                device=device,
+                tta_transforms=tta_transforms,
+                tta_weights=tta_weights,
+            )
+        else:
+            prob = predict_prob_map_tiled(
+                model,
+                image,
+                input_size=input_size,
+                device=device,
+                tiling=tiling,
+                tta_transforms=tta_transforms,
+                tta_weights=tta_weights,
+            )
 
         instances = postprocess_prob(prob, post)
         ann = masks_to_annotation(instances)

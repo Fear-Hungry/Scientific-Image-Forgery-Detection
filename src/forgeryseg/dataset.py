@@ -29,22 +29,36 @@ def list_cases(
     cases: list[Case] = []
 
     if split == "train":
-        if include_authentic:
-            for img_path in sorted((root / "train_images" / "authentic").glob("*.png")):
-                cases.append(Case(case_id=img_path.stem, image_path=img_path, mask_path=None))
-        if include_forged:
-            for img_path in sorted((root / "train_images" / "forged").glob("*.png")):
-                mask_path = root / "train_masks" / f"{img_path.stem}.npy"
-                cases.append(Case(case_id=img_path.stem, image_path=img_path, mask_path=mask_path))
+        auth_paths = sorted((root / "train_images" / "authentic").glob("*.png")) if include_authentic else []
+        forged_paths = sorted((root / "train_images" / "forged").glob("*.png")) if include_forged else []
+        namespace = False
+        if include_authentic and include_forged:
+            overlap = {p.stem for p in auth_paths} & {p.stem for p in forged_paths}
+            namespace = bool(overlap)
+
+        for img_path in auth_paths:
+            case_id = f"authentic_{img_path.stem}" if namespace else img_path.stem
+            cases.append(Case(case_id=case_id, image_path=img_path, mask_path=None))
+        for img_path in forged_paths:
+            case_id = f"forged_{img_path.stem}" if namespace else img_path.stem
+            mask_path = root / "train_masks" / f"{img_path.stem}.npy"
+            cases.append(Case(case_id=case_id, image_path=img_path, mask_path=mask_path))
 
     elif split == "supplemental":
-        if include_authentic:
-            for img_path in sorted((root / "supplemental_images" / "authentic").glob("*.png")):
-                cases.append(Case(case_id=img_path.stem, image_path=img_path, mask_path=None))
-        if include_forged:
-            for img_path in sorted((root / "supplemental_images" / "forged").glob("*.png")):
-                mask_path = root / "supplemental_masks" / f"{img_path.stem}.npy"
-                cases.append(Case(case_id=img_path.stem, image_path=img_path, mask_path=mask_path))
+        auth_paths = sorted((root / "supplemental_images" / "authentic").glob("*.png")) if include_authentic else []
+        forged_paths = sorted((root / "supplemental_images" / "forged").glob("*.png")) if include_forged else []
+        namespace = False
+        if include_authentic and include_forged:
+            overlap = {p.stem for p in auth_paths} & {p.stem for p in forged_paths}
+            namespace = bool(overlap)
+
+        for img_path in auth_paths:
+            case_id = f"authentic_{img_path.stem}" if namespace else img_path.stem
+            cases.append(Case(case_id=case_id, image_path=img_path, mask_path=None))
+        for img_path in forged_paths:
+            case_id = f"forged_{img_path.stem}" if namespace else img_path.stem
+            mask_path = root / "supplemental_masks" / f"{img_path.stem}.npy"
+            cases.append(Case(case_id=case_id, image_path=img_path, mask_path=mask_path))
 
     elif split == "test":
         for img_path in sorted((root / "test_images").glob("*.png")):

@@ -1,22 +1,11 @@
 from __future__ import annotations
 
 import argparse
-import csv
-from dataclasses import dataclass
 from pathlib import Path
 
 import _bootstrap  # noqa: F401
-import pandas as pd
-from tqdm import tqdm
 
-from forgeryseg.ensemble import ensemble_annotations, rank_weights_by_score
-from forgeryseg.submission import list_ordered_cases
-
-
-@dataclass(frozen=True)
-class SubInput:
-    path: Path
-    score: float | None
+from forgeryseg.ensemble_io import ensemble_submissions_from_csvs
 
 
 def main() -> None:
@@ -30,51 +19,18 @@ def main() -> None:
     ap.add_argument("--out", type=Path, required=True)
     args = ap.parse_args()
 
-    subs: list[SubInput] = []
-    for idx, p in enumerate(args.subs):
-        score = None
-        if args.scores and idx < len(args.scores):
-            score = float(args.scores[idx])
-        subs.append(SubInput(path=p, score=score))
-
-    sub_tables: list[dict[str, str]] = []
-    for s in subs:
-        df = pd.read_csv(s.path)
-        if "case_id" not in df.columns or "annotation" not in df.columns:
-            raise ValueError(f"{s.path} must have columns case_id,annotation")
-        sub_tables.append(dict(zip(df["case_id"].astype(str), df["annotation"], strict=True)))
-
-    if args.method == "weighted":
-        if any(s.score is None for s in subs):
-            weights = [1.0 / len(subs)] * len(subs)
-        else:
-            weights = rank_weights_by_score([float(s.score) for s in subs])
-        print(f"weights={weights}")
-
-    cases = list_ordered_cases(args.data_root, args.split)
-    rows: list[dict[str, str]] = []
-    for case in tqdm(cases, desc="Ensemble"):
-        import cv2
-
-        h, w = cv2.imread(str(case.image_path), cv2.IMREAD_UNCHANGED).shape[:2]
-        anns = [table.get(case.case_id, "authentic") for table in sub_tables]
-        ann_out = ensemble_annotations(
-            anns,
-            shape=(h, w),
-            method=args.method,
-            weights=weights if args.method == "weighted" else None,
-            threshold=float(args.threshold),
-        )
-        rows.append({"case_id": case.case_id, "annotation": ann_out})
-
-    args.out.parent.mkdir(parents=True, exist_ok=True)
-    with args.out.open("w", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=["case_id", "annotation"])
-        writer.writeheader()
-        writer.writerows(rows)
-    n_auth = sum(1 for r in rows if r["annotation"] == "authentic")
-    print(f"Wrote {args.out} ({n_auth}/{len(rows)} authentic)")
+    scores = list(args.scores) if args.scores else None
+    ensemble_submissions_from_csvs(
+        sub_paths=args.subs,
+        data_root=args.data_root,
+        split=args.split,  # type: ignore[arg-type]
+        out_path=args.out,
+        method=str(args.method),
+        scores=scores,
+        threshold=float(args.threshold),
+    )
 
 
 if __name__ == "__main__":
     main()
+

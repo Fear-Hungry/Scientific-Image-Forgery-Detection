@@ -8,6 +8,34 @@ version = "0.1.0"
 description = "Scientific Image Forgery Detection utilities"
 readme = "README.md"
 requires-python = ">=3.10"
+license = {file = "LICENSE"}
+authors = [{name = "Scientific-Image-Forgery-Detection contributors"}]
+keywords = ["kaggle", "image-forensics", "segmentation", "copy-move", "forgery-detection"]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "License :: OSI Approved :: MIT License",
+]
+dependencies = [
+  "albumentations",
+  "numpy",
+  "opencv-python",
+  "pandas",
+  "pillow",
+  "scikit-learn",
+  "scipy",
+  "segmentation-models-pytorch",
+  "timm",
+  "torch",
+  "torchvision",
+  "tqdm",
+]
+
+[project.optional-dependencies]
+dev = ["pytest", "ruff"]
+
+[project.urls]
+Repository = "https://github.com/Fear-Hungry/Scientific-Image-Forgery-Detection"
 
 [tool.setuptools.packages.find]
 where = ["src"]

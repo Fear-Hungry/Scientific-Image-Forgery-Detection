@@ -17,6 +17,7 @@ def main() -> None:
     ap.add_argument("--method", choices=["weighted", "majority", "union", "intersection"], default="weighted")
     ap.add_argument("--threshold", type=float, default=0.5)
     ap.add_argument("--out", type=Path, required=True)
+    ap.add_argument("--diagnostics", type=Path, default=None, help="Optional CSV with per-case diagnostics.")
     args = ap.parse_args()
 
     scores = list(args.scores) if args.scores else None
@@ -28,9 +29,9 @@ def main() -> None:
         method=str(args.method),
         scores=scores,
         threshold=float(args.threshold),
+        diagnostics_path=args.diagnostics,
     )
 
 
 if __name__ == "__main__":
     main()
-

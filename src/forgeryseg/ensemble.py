@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Literal, Sequence
 
 import cv2
@@ -14,10 +15,10 @@ def rank_weights_by_score(scores: Sequence[float]) -> list[float]:
     n = len(scores)
     if n == 0:
         return []
-    order = np.argsort(np.asarray(scores))  # lowest score -> highest weight
+    order = np.argsort(np.asarray(scores))  # lowest score -> lowest weight
     raw = np.zeros(n, dtype=np.float32)
     for rank, idx in enumerate(order):
-        raw[idx] = float(n - rank)
+        raw[idx] = float(rank + 1)
     w = raw / raw.sum()
     return w.tolist()
 
@@ -34,6 +35,14 @@ def binary_mask_to_instances(mask: np.ndarray) -> list[np.ndarray]:
     return out
 
 
+@dataclass(frozen=True)
+class EnsembleDiagnostics:
+    n_inputs: int
+    n_non_empty_inputs: int
+    n_instances_out: int
+    out_area: int
+
+
 def ensemble_annotations(
     annotations: Sequence[str | float | None],
     *,
@@ -42,10 +51,29 @@ def ensemble_annotations(
     weights: Sequence[float] | None = None,
     threshold: float = 0.5,
 ) -> str:
+    ann, _ = ensemble_annotations_with_diagnostics(
+        annotations,
+        shape=shape,
+        method=method,
+        weights=weights,
+        threshold=threshold,
+    )
+    return ann
+
+
+def ensemble_annotations_with_diagnostics(
+    annotations: Sequence[str | float | None],
+    *,
+    shape: tuple[int, int],
+    method: EnsembleMethod = "weighted",
+    weights: Sequence[float] | None = None,
+    threshold: float = 0.5,
+) -> tuple[str, EnsembleDiagnostics]:
     if len(annotations) == 0:
-        return "authentic"
+        return "authentic", EnsembleDiagnostics(n_inputs=0, n_non_empty_inputs=0, n_instances_out=0, out_area=0)
 
     masks = [annotation_to_union_mask(a, shape) for a in annotations]
+    n_non_empty = sum(1 for m in masks if int(m.sum()) > 0)
 
     if method == "union":
         combined = np.clip(np.sum(np.stack(masks, axis=0), axis=0), 0, 1).astype(np.uint8)
@@ -66,5 +94,12 @@ def ensemble_annotations(
             prob += m.astype(np.float32) * float(wgt)
         combined = (prob > float(threshold)).astype(np.uint8)
 
-    return masks_to_annotation(binary_mask_to_instances(combined))
-
+    instances = binary_mask_to_instances(combined)
+    ann_out = masks_to_annotation(instances)
+    diag = EnsembleDiagnostics(
+        n_inputs=len(annotations),
+        n_non_empty_inputs=int(n_non_empty),
+        n_instances_out=len(instances),
+        out_area=int(combined.sum()),
+    )
+    return ann_out, diag

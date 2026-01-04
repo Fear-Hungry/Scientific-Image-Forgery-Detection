@@ -142,12 +142,30 @@ class ScoreSummary:
         return out
 
 
-def score_submission_annotations(
+@dataclass(frozen=True)
+class CaseScore:
+    case_id: str
+    score: float
+    is_forged: bool
+    pred_is_authentic: bool
+    gt_is_authentic: bool
+    n_pred_instances: int
+    n_gt_instances: int
+    decode_error: bool = False
+
+
+def score_submission_detailed(
     pred: dict[str, str | float | None],
     *,
     data_root: Pathish,
     split: Split,
-) -> ScoreSummary:
+    progress: bool = True,
+) -> tuple[ScoreSummary, list[CaseScore]]:
+    """
+    Returns:
+      - ScoreSummary (same meaning as score_submission_annotations)
+      - Per-case scores for debugging/postprocess tuning
+    """
     cases = list_cases(data_root, split, include_authentic=True, include_forged=True)
 
     scores_all: list[float] = []
@@ -157,42 +175,102 @@ def score_submission_annotations(
     n_forg_pred_as_auth = 0
     decode_errors = 0
 
-    for case in tqdm(cases, desc=f"Scoring {split}"):
+    per_case: list[CaseScore] = []
+
+    it = tqdm(cases, desc=f"Scoring {split}") if progress else cases
+    for case in it:
         ann = pred.get(case.case_id, "authentic")
+        pred_is_auth = is_authentic_annotation(ann)
 
         if case.mask_path is None:
-            s = 1.0 if is_authentic_annotation(ann) else 0.0
+            s = 1.0 if pred_is_auth else 0.0
             if s == 0.0:
                 n_auth_pred_as_forged += 1
+
+            n_pred = 0
+            decode_err = False
+            if not pred_is_auth and Image is not None:
+                try:
+                    assert Image is not None
+                    with Image.open(case.image_path) as im:
+                        w, h = im.size
+                    n_pred = len(annotation_to_masks(ann, (h, w)))
+                except Exception:
+                    decode_err = True
+                    decode_errors += 1
+                    n_pred = 0
+
             scores_all.append(s)
             scores_auth.append(s)
+            per_case.append(
+                CaseScore(
+                    case_id=case.case_id,
+                    score=float(s),
+                    is_forged=False,
+                    pred_is_authentic=bool(pred_is_auth),
+                    gt_is_authentic=True,
+                    n_pred_instances=int(n_pred),
+                    n_gt_instances=0,
+                    decode_error=bool(decode_err),
+                )
+            )
             continue
 
-        if is_authentic_annotation(ann):
+        gt_masks = load_mask_instances(case.mask_path)
+        n_gt = len(gt_masks)
+        h, w = gt_masks[0].shape
+
+        if pred_is_auth:
             n_forg_pred_as_auth += 1
             s = 0.0
             scores_all.append(s)
             scores_forg.append(s)
+            per_case.append(
+                CaseScore(
+                    case_id=case.case_id,
+                    score=float(s),
+                    is_forged=True,
+                    pred_is_authentic=True,
+                    gt_is_authentic=False,
+                    n_pred_instances=0,
+                    n_gt_instances=int(n_gt),
+                )
+            )
             continue
 
-        gt_masks = load_mask_instances(case.mask_path)
-        h, w = gt_masks[0].shape
+        decode_err = False
+        n_pred = 0
         try:
             pred_masks = annotation_to_masks(ann, (h, w))
+            n_pred = len(pred_masks)
             s = float(of1_score(pred_masks, gt_masks))
         except ImportError:
             raise
         except Exception:
+            decode_err = True
             decode_errors += 1
             s = 0.0
+            n_pred = 0
 
-        scores_all.append(s)
-        scores_forg.append(s)
+        scores_all.append(float(s))
+        scores_forg.append(float(s))
+        per_case.append(
+            CaseScore(
+                case_id=case.case_id,
+                score=float(s),
+                is_forged=True,
+                pred_is_authentic=False,
+                gt_is_authentic=False,
+                n_pred_instances=int(n_pred),
+                n_gt_instances=int(n_gt),
+                decode_error=bool(decode_err),
+            )
+        )
 
     def _mean(x: list[float]) -> float:
         return float(np.mean(x)) if x else 0.0
 
-    return ScoreSummary(
+    summary = ScoreSummary(
         mean_score=_mean(scores_all),
         mean_authentic=_mean(scores_auth),
         mean_forged=_mean(scores_forg),
@@ -203,6 +281,17 @@ def score_submission_annotations(
         forg_pred_as_auth=n_forg_pred_as_auth,
         decode_errors_scoring=decode_errors,
     )
+    return summary, per_case
+
+
+def score_submission_annotations(
+    pred: dict[str, str | float | None],
+    *,
+    data_root: Pathish,
+    split: Split,
+) -> ScoreSummary:
+    summary, _ = score_submission_detailed(pred, data_root=data_root, split=split, progress=True)
+    return summary
 
 
 def score_submission_csv(

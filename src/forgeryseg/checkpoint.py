@@ -21,3 +21,9 @@ def load_flexible_state_dict(model: torch.nn.Module, checkpoint: str | Path) -> 
     missing, unexpected = model.load_state_dict(state, strict=False)
     return list(missing), list(unexpected)
 
+
+def warn_state_dict(missing: list[str], unexpected: list[str]) -> None:
+    if missing:
+        print(f"[warn] Missing keys ({len(missing)}): {missing[:5]}{'...' if len(missing) > 5 else ''}")
+    if unexpected:
+        print(f"[warn] Unexpected keys ({len(unexpected)}): {unexpected[:5]}{'...' if len(unexpected) > 5 else ''}")

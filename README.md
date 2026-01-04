@@ -25,10 +25,10 @@ python scripts/predict_submission.py --config configs/dino_v3_518_r69_fft_gate.j
 
 ## Atualizações (2026-01-04)
 
-- Refatoração: lógica centralizada em `src/forgeryseg/` (treino, ensemble, avaliação e empacote para Kaggle Dataset).
-- `scripts/` agora são wrappers que chamam a biblioteca (menos duplicação e mais reuso).
-- Notebook de submissão com validação de formato do `submission.csv` e score local (quando `split=train/supplemental`).
-- Atalhos: `Makefile` (`make install|train|predict|eval|test|package|sync_notebook`) e `requirements-kaggle.txt` (pinagem para reproduzir ambiente).
+- Inferência mais modular: `InferenceEngine` + `SubmissionWriter` (inclui `batch_size` quando não usa tiling) e `FFTGate` opcional.
+- Avaliação local: `scripts/evaluate_submission.py` valida CSV/decodificação e calcula o score (oF1) em `train/supplemental`.
+- Ensemble melhorado: pesos automáticos por score (bugfix) e opção `--diagnostics` para depuração por `case_id`.
+- Documentação/atalhos: `docs/CONFIG.md`, `docs/KAGGLE.md`, `Makefile` e `requirements-kaggle.txt` (pinagem para reproduzir ambiente).
 
 ## Sumário
 

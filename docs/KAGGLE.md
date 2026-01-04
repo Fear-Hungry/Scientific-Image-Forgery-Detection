@@ -44,6 +44,13 @@ Configs:
 - Estrutura e campos documentados em `docs/CONFIG.md`
 - No CLI, você pode sobrescrever parâmetros sem editar o arquivo via `--set chave=valor` (ex.: `--set inference.postprocess.min_area=200`)
 
+Sanity-check (recomendado):
+
+- Para checar **formato/decodificação** do CSV no Kaggle (sem ground truth), rode:
+  - `python scripts/evaluate_submission.py --data-root <DATA_ROOT> --split test --csv /kaggle/working/submission.csv`
+- Para checar **score local** (quando rodar em `train`/`supplemental`):
+  - `python scripts/evaluate_submission.py --data-root <DATA_ROOT> --split train --csv /kaggle/working/submission.csv --show-worst 20`
+
 ## 3) Treino no Kaggle (opcional)
 
 Se você quiser treinar dentro do Kaggle (internet ON), rode os scripts a partir do notebook:
@@ -73,3 +80,11 @@ Você pode gerar uma pasta pronta para upload via:
 - `python scripts/package_kaggle_dataset.py --out-dir kaggle_bundle --include-models`
 
 Depois, crie um Kaggle Dataset a partir de `kaggle_bundle/`.
+
+## 5) Ensemble (opcional)
+
+Se você gerar múltiplas submissões (ex.: modelos/seed diferentes), pode ensemblar via:
+
+- `python scripts/ensemble_submissions.py --data-root data/recodai --split test --subs sub1.csv sub2.csv --method weighted --scores 0.33 0.35 --out outputs/submission_ens.csv --diagnostics outputs/ensemble_diag.csv`
+
+O `--diagnostics` grava um CSV por `case_id` (área final, nº de instâncias, etc.) para depuração.

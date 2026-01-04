@@ -275,6 +275,7 @@ class FFTGateConfig:
 
 @dataclass
 class SegmentationInferenceConfig:
+    batch_size: int = 1
     tta: TTAConfig = field(default_factory=TTAConfig)
     tiling: TilingConfig | None = None
     postprocess: PostprocessConfig = field(default_factory=PostprocessConfig)
@@ -286,6 +287,7 @@ class SegmentationInferenceConfig:
         tiling_raw = d.get("tiling")
         tiling = TilingConfig.from_dict(tiling_raw) if isinstance(tiling_raw, dict) else None
         return cls(
+            batch_size=int(d.get("batch_size", cls.batch_size)),
             tta=TTAConfig.from_dict(d.get("tta")),
             tiling=tiling,
             postprocess=PostprocessConfig.from_dict(d.get("postprocess")),
@@ -309,7 +311,7 @@ class SegmentationTrainConfig:
     lr_min: float = 1e-6
     max_lr: float = 0.0
     pct_start: float = 0.1
-    patience: int = 3
+    patience: int = 0
     min_delta: float = 0.0
 
     @classmethod

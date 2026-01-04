@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from forgeryseg.ensemble import ensemble_annotations
+from forgeryseg.ensemble import ensemble_annotations, rank_weights_by_score
 from forgeryseg.rle import annotation_to_union_mask, masks_to_annotation
 
 
@@ -26,3 +26,10 @@ def test_ensemble_weighted_threshold() -> None:
     out = ensemble_annotations([ann, "authentic", "authentic"], shape=shape, method="weighted", weights=[0.6, 0.2, 0.2])
     out_mask = annotation_to_union_mask(out, shape)
     assert out_mask[0, 0] == 1
+
+
+def test_rank_weights_by_score_prefers_higher_score() -> None:
+    w = rank_weights_by_score([0.1, 0.2, 0.9])
+    assert len(w) == 3
+    # highest score gets highest weight
+    assert w[2] > w[1] > w[0]

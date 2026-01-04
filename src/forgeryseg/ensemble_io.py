@@ -7,7 +7,7 @@ from pathlib import Path
 import pandas as pd
 from tqdm import tqdm
 
-from .ensemble import ensemble_annotations, rank_weights_by_score
+from .ensemble import ensemble_annotations_with_diagnostics, rank_weights_by_score
 from .submission import list_ordered_cases
 from .typing import Pathish, Split
 
@@ -18,6 +18,7 @@ class EnsembleResult:
     n_rows: int
     n_authentic: int
     weights: list[float] | None
+    diagnostics_path: Path | None = None
 
 
 def ensemble_submissions_from_csvs(
@@ -30,6 +31,7 @@ def ensemble_submissions_from_csvs(
     weights: list[float] | None = None,
     scores: list[float] | None = None,
     threshold: float = 0.5,
+    diagnostics_path: Pathish | None = None,
 ) -> EnsembleResult:
     if not sub_paths:
         raise ValueError("sub_paths cannot be empty")
@@ -59,10 +61,11 @@ def ensemble_submissions_from_csvs(
     import cv2
 
     rows: list[dict[str, str]] = []
+    diag_rows: list[dict[str, int | str]] = []
     for case in tqdm(cases, desc="Ensemble"):
         h, w = cv2.imread(str(case.image_path), cv2.IMREAD_UNCHANGED).shape[:2]
         anns = [t.get(case.case_id, "authentic") for t in sub_tables]
-        ann_out = ensemble_annotations(
+        ann_out, diag = ensemble_annotations_with_diagnostics(
             anns,
             shape=(h, w),
             method=method,  # type: ignore[arg-type]
@@ -70,6 +73,15 @@ def ensemble_submissions_from_csvs(
             threshold=float(threshold),
         )
         rows.append({"case_id": case.case_id, "annotation": ann_out})
+        diag_rows.append(
+            {
+                "case_id": case.case_id,
+                "n_inputs": int(diag.n_inputs),
+                "n_non_empty_inputs": int(diag.n_non_empty_inputs),
+                "n_instances_out": int(diag.n_instances_out),
+                "out_area": int(diag.out_area),
+            }
+        )
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
     with out_path.open("w", newline="") as f:
@@ -79,5 +91,18 @@ def ensemble_submissions_from_csvs(
 
     n_auth = sum(1 for r in rows if r["annotation"] == "authentic")
     print(f"Wrote {out_path} ({n_auth}/{len(rows)} authentic)")
-    return EnsembleResult(out_path=out_path, n_rows=len(rows), n_authentic=n_auth, weights=weights)
 
+    diag_path: Path | None = None
+    if diagnostics_path is not None:
+        diag_path = Path(diagnostics_path)
+        diag_path.parent.mkdir(parents=True, exist_ok=True)
+        pd.DataFrame(diag_rows).to_csv(diag_path, index=False)
+        print(f"Wrote diagnostics to {diag_path}")
+
+    return EnsembleResult(
+        out_path=out_path,
+        n_rows=len(rows),
+        n_authentic=n_auth,
+        weights=weights,
+        diagnostics_path=diag_path,
+    )

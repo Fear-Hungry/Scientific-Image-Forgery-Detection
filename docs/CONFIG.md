@@ -35,6 +35,7 @@ Usada por:
     "freq_fusion": {}
   },
   "inference": {
+    "batch_size": 1,
     "tta": {"zoom_scale": 0.9, "weights": [0.6, 0.2, 0.2]},
     "tiling": {"tile_size": 1024, "overlap": 128, "batch_size": 4},
     "postprocess": {"prob_threshold": 0.5, "...": 0},
@@ -48,7 +49,7 @@ Usada por:
     "folds": 1,
     "aug": "basic",
     "scheduler": "none",
-    "patience": 3,
+    "patience": 0,
     "min_delta": 0.0
   }
 }
@@ -61,10 +62,33 @@ Usada por:
 - `model.checkpoint`: checkpoint do modelo completo (usado na inferência)
 - `model.encoder.*`: especificação do encoder DINOv2 (timm)
 - `inference.tta.*`: TTA (por padrão: identidade + flip + zoom-out)
+- `inference.batch_size`: batch de imagens (quando `tiling` está desligado)
 - `inference.tiling.*`: *tiled inference* (opcional; use quando imagem é grande)
 - `inference.postprocess.*`: threshold/filtros/regras para decidir `authentic` e instâncias
 - `inference.fft_gate.*`: classificador FFT opcional para revisar casos `authentic`
 - `train.*`: defaults de treino (podem ser sobrescritos no CLI)
+
+### `inference.postprocess` (documentação rápida)
+
+Campos (ver também `src/forgeryseg/postprocess.py`):
+
+- `prob_threshold`: threshold principal (pixel) para binarizar o `prob_map`.
+- `gaussian_sigma`: suavização do `prob_map` via Gaussian blur (0 desliga).
+- `sobel_weight`: reforço de borda via Sobel no `prob_map` (0 desliga).
+- `open_kernel`: abertura morfológica (remove ruído); `<=1` desliga.
+- `close_kernel`: fechamento morfológico (fecha buracos); `<=1` desliga.
+- `min_area`: remove componentes com área menor que este valor.
+- `min_mean_conf`: exige `mean(prob)` da máscara união acima deste valor.
+- `min_prob_std`: se `std(prob_map)` for menor que este valor, retorna `authentic` (útil para “mapa flat”).
+- `small_area`: limiar de área para regra especial de componentes pequenos (opcional).
+- `small_min_mean_conf`: confiança mínima exigida quando `area < small_area` (opcional).
+- `authentic_area_max`: heurística “authentic”: se a máscara união tiver `area < authentic_area_max` (opcional).
+- `authentic_conf_max`: e `mean(prob) < authentic_conf_max`, então retorna `authentic` (opcional).
+
+Observações:
+
+- `authentic_*` é útil para reduzir falsos positivos pequenos/baixos; combine com `min_area`.
+- Com `fft_gate` ligado, casos previstos como `authentic` podem ser reavaliados com heurísticas menos agressivas.
 
 ## 2) Config do classificador FFT
 

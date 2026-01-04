@@ -146,6 +146,7 @@ TUNE_USE_TTA = False  # True = mais fiel ao config, porém mais lento
 TUNE_THR_START = 0.20
 TUNE_THR_STOP = 0.60
 TUNE_THR_STEP = 0.05
+TUNE_WRITE_TUNED_CONFIG = True
 
 # Empacotar um folder pronto para upload como Kaggle Dataset (offline):
 DO_PACKAGE = True
@@ -311,6 +312,7 @@ if TUNE_POSTPROCESS:
     import numpy as np
     from tqdm import tqdm
 
+    from forgeryseg.config import apply_overrides, load_config_data
     from forgeryseg.dataset import list_cases, load_mask_instances
     from forgeryseg.eval import ScoreSummary
     from forgeryseg.inference import load_rgb
@@ -548,6 +550,19 @@ if TUNE_POSTPROCESS:
     )
     print(f"[tune] Wrote {tuned_path}")
 
+    tuned_config_path = None
+    if TUNE_WRITE_TUNED_CONFIG:
+
+        def _slug_float(x: float) -> str:
+            s = f"{float(x):.4f}".rstrip("0").rstrip(".")
+            return s.replace(".", "p")
+
+        tuned_cfg = load_config_data(TUNE_CONFIG)
+        tuned_cfg = apply_overrides(tuned_cfg, best_overrides)
+        tuned_config_path = OUT_DIR / f"tuned_{Path(TUNE_CONFIG).stem}_thr{_slug_float(best_thr)}.json"
+        tuned_config_path.write_text(json.dumps(tuned_cfg, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+        print(f"[tune] Wrote {tuned_config_path}")
+
 # %%
 # -------------------------
 # Package Kaggle Dataset folder
@@ -567,4 +582,13 @@ if DO_PACKAGE:
         repo_root=CODE_ROOT,
     )
     print(f"Wrote Kaggle bundle at: {out_root.resolve()}")
+
+    if TUNE_POSTPROCESS and "tuned_config_path" in globals():
+        p = globals().get("tuned_config_path")
+        if isinstance(p, Path) and p.exists():
+            dst = out_root / "configs" / p.name
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(p, dst)
+            print(f"Copied tuned config into bundle: {dst}")
+
     print("Crie um Kaggle Dataset a partir desse folder e anexe no notebook de submissão offline.")

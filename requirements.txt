@@ -1,12 +1,13 @@
 numpy
+pandas
 pillow
 scipy
 scikit-learn
+tqdm
 albumentations
 opencv-python
 torch
 torchvision
 timm
 segmentation-models-pytorch
-transformers
 pytest

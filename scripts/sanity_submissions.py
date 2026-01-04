@@ -1,85 +1,79 @@
-#!/usr/bin/env python
 from __future__ import annotations
+
+import _bootstrap  # noqa: F401
 
 import argparse
 import csv
 from pathlib import Path
 
 import numpy as np
+import pandas as pd
+from tqdm import tqdm
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-SRC_ROOT = PROJECT_ROOT / "src"
-import sys
-
-sys.path.insert(0, str(SRC_ROOT))
-
-from forgeryseg.dataset import build_test_index, build_train_index, load_mask_instances
-from forgeryseg.metric import score_image
-from forgeryseg.rle import encode_instances
+from forgeryseg.dataset import list_cases, load_mask_instances
+from forgeryseg.metric import of1_score
+from forgeryseg.rle import annotation_to_masks, masks_to_annotation
 
 
-def _case_id_for_csv(sample, unique_case_ids: bool) -> str:
-    if not unique_case_ids:
-        return sample.case_id
-    if sample.label:
-        return f"{sample.label}-{sample.case_id}"
-    return sample.case_id
+def _score_rows(
+    rows: dict[str, str],
+    *,
+    data_root: Path,
+    split: str,
+) -> float:
+    cases = list_cases(data_root, split, include_authentic=True, include_forged=True)
+    scores: list[float] = []
+    for case in cases:
+        pred_ann = rows.get(case.case_id, "authentic")
+        if case.mask_path is None:
+            scores.append(1.0 if pred_ann == "authentic" else 0.0)
+            continue
 
+        gt_masks = load_mask_instances(case.mask_path)
+        if pred_ann == "authentic":
+            scores.append(0.0)
+            continue
 
-def _write_csv(rows, path: Path) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=["case_id", "annotation"])
-        writer.writeheader()
-        writer.writerows(rows)
+        # shape-safe decode using ground-truth H/W
+        h, w = gt_masks[0].shape
+        pred_masks = annotation_to_masks(pred_ann, (h, w))
+        scores.append(of1_score(pred_masks, gt_masks))
+
+    return float(np.mean(scores)) if scores else 0.0
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Generate sanity submissions")
-    parser.add_argument("--data-root", default="data/recodai", help="Path to dataset root")
-    parser.add_argument("--split", choices=["train", "test"], default="train")
-    parser.add_argument("--out-dir", default="outputs/sanity", help="Directory for CSVs")
-    parser.add_argument("--unique-case-ids", action="store_true", help="Avoid duplicate case_id in train")
-    args = parser.parse_args()
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--data-root", type=Path, required=True)
+    ap.add_argument("--out-dir", type=Path, required=True)
+    ap.add_argument("--split", choices=["train", "supplemental"], default="train")
+    args = ap.parse_args()
 
-    out_dir = Path(args.out_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
+    args.out_dir.mkdir(parents=True, exist_ok=True)
 
-    if args.split == "train":
-        samples = build_train_index(args.data_root)
-    else:
-        samples = build_test_index(args.data_root)
+    cases = list_cases(args.data_root, args.split, include_authentic=True, include_forged=True)
 
-    modes = ["authentic"]
-    if args.split == "train":
-        modes.append("gt")
+    oracle_rows: list[dict[str, str]] = []
+    for case in tqdm(cases, desc="Oracle"):
+        if case.mask_path is None:
+            oracle_rows.append({"case_id": case.case_id, "annotation": "authentic"})
+            continue
+        gt_masks = load_mask_instances(case.mask_path)
+        ann = masks_to_annotation(gt_masks)
+        oracle_rows.append({"case_id": case.case_id, "annotation": ann})
 
-    for mode in modes:
-        rows = []
-        scores = []
-        for sample in samples:
-            if mode == "authentic":
-                pred_instances = []
-            else:
-                pred_instances = load_mask_instances(sample.mask_path) if sample.mask_path else []
+    oracle_path = args.out_dir / f"oracle_{args.split}.csv"
+    pd.DataFrame(oracle_rows).to_csv(oracle_path, index=False)
+    oracle_score = _score_rows(dict(zip([r["case_id"] for r in oracle_rows], [r["annotation"] for r in oracle_rows])) , data_root=args.data_root, split=args.split)
+    print(f"oracle: {oracle_path} score={oracle_score:.6f}")
 
-            annotation = encode_instances(pred_instances)
-            rows.append({
-                "case_id": _case_id_for_csv(sample, args.unique_case_ids),
-                "annotation": annotation,
-            })
-
-            if args.split == "train":
-                gt_instances = load_mask_instances(sample.mask_path) if sample.mask_path else []
-                scores.append(score_image(gt_instances, pred_instances))
-
-        out_path = out_dir / f"sanity_{args.split}_{mode}.csv"
-        _write_csv(rows, out_path)
-
-        if scores:
-            print(f"{mode}: mean score {float(np.mean(scores)):.6f}")
-        else:
-            print(f"{mode}: wrote {out_path}")
+    all_auth_path = args.out_dir / f"all_authentic_{args.split}.csv"
+    with all_auth_path.open("w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=["case_id", "annotation"])
+        writer.writeheader()
+        writer.writerows({"case_id": c.case_id, "annotation": "authentic"} for c in cases)
+    all_auth_score = _score_rows({c.case_id: "authentic" for c in cases}, data_root=args.data_root, split=args.split)
+    print(f"all_authentic: {all_auth_path} score={all_auth_score:.6f}")
 
 
 if __name__ == "__main__":

@@ -253,3 +253,37 @@ unzip -q data/recodai-luc-scientific-image-forgery-detection.zip -d data/recodai
 ---
 
 Este README é um guia derivado da proposta e do formato oficial da competição. Para informações legais e definitivas (regras, elegibilidade, licenças, prazos), consulte a página do Kaggle: https://www.kaggle.com/competitions/recodai-luc-scientific-image-forgery-detection
+
+---
+
+## Pipeline (DINOv2 + CNN) — scripts deste repo
+
+Configurações prontas (3 versões) em `configs/` e CLIs em `scripts/`:
+
+- Gerar submissão individual:
+  - `python scripts/predict_submission.py --config configs/dino_v1_718_u52.json --data-root data/recodai --split test --out outputs/submission1.csv`
+  - `python scripts/predict_submission.py --config configs/dino_v2_518_basev1.json --data-root data/recodai --split test --out outputs/submission2.csv`
+  - `python scripts/predict_submission.py --config configs/dino_v3_518_r69.json --data-root data/recodai --split test --out outputs/submission3.csv`
+- Ensemble ponderado (a partir das submissões):
+  - `python scripts/ensemble_submissions.py --data-root data/recodai --split test --subs outputs/submission1.csv outputs/submission2.csv outputs/submission3.csv --scores 0.324 0.323 0.322 --method weighted --out outputs/submission.csv`
+- Sanidade (oracle + baseline all-authentic no treino):
+  - `python scripts/sanity_submissions.py --data-root data/recodai --out-dir outputs/sanity --split train`
+
+Os caminhos de checkpoints em `configs/*.json` são placeholders (ex.: `outputs/models/u52.pth`) e devem existir no ambiente de execução.
+
+### FFT como sinal complementar (opcional)
+
+Este repo também inclui um *gate* opcional baseado em FFT para reforçar decisões `authentic` vs `forged` quando o pós-processamento zera a máscara:
+
+- Treinar um classificador FFT (log-magnitude):
+  - `python scripts/train_fft_classifier.py --config configs/fft_classifier_logmag_256.json --data-root data/recodai --out outputs/models/fft_cls.pth`
+- Rodar submissão com `fft_gate` habilitado (exemplo):
+  - `python scripts/predict_submission.py --config configs/dino_v3_518_r69_fft_gate.json --data-root data/recodai --split test --out outputs/submission_fft_gate.csv`
+
+### Fusão espacial + frequência (opcional)
+
+Além do *gate* (classificador), existe um modelo `dinov2_freq_fusion` que extrai uma representação FFT no `forward()` e faz fusão com os tokens do encoder antes do decoder. Exemplo:
+
+- `python scripts/predict_submission.py --config configs/dino_v3_518_r69_freq_fusion.json --data-root data/recodai --split test --out outputs/submission_freq_fusion.csv`
+
+Modos suportados em `freq_fusion.mode`: `logmag`, `hp_residual`, `phase_only`, `lp_hp`.

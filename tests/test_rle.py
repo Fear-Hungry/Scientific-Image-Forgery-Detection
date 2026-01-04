@@ -1,35 +1,38 @@
-import json
+from __future__ import annotations
 
 import numpy as np
 
-from forgeryseg.rle import decode_annotation, encode_instances, rle_decode, rle_encode
+from forgeryseg.rle import annotation_to_masks, masks_to_annotation
 
 
-def test_rle_column_major_order():
-    mask = np.array([[1, 0], [1, 1]], dtype=np.uint8)
-    assert rle_encode(mask) == [1, 2, 4, 1]
-
-
-def test_rle_round_trip():
+def test_rle_roundtrip_single_instance() -> None:
     mask = np.zeros((3, 3), dtype=np.uint8)
-    mask[1, 1] = 1
-    encoded = rle_encode(mask)
-    decoded = rle_decode(encoded, mask.shape)
-    assert np.array_equal(mask, decoded)
+    mask[0, 0] = 1
+    mask[2, 1] = 1
+
+    ann = masks_to_annotation([mask])
+    assert ann == "[1, 1, 6, 1]"
+
+    decoded = annotation_to_masks(ann, mask.shape)
+    assert len(decoded) == 1
+    assert np.array_equal(decoded[0], mask)
 
 
-def test_encode_instances_authentic():
-    mask = np.zeros((2, 2), dtype=np.uint8)
-    assert encode_instances([mask]) == "authentic"
+def test_rle_multiple_instances() -> None:
+    m1 = np.zeros((4, 4), dtype=np.uint8)
+    m1[0, 0] = 1
+    m2 = np.zeros((4, 4), dtype=np.uint8)
+    m2[3, 3] = 1
 
-
-def test_decode_annotation_multiple_instances():
-    mask1 = np.zeros((2, 2), dtype=np.uint8)
-    mask1[0, 0] = 1
-    mask2 = np.zeros((2, 2), dtype=np.uint8)
-    mask2[1, 1] = 1
-    annotation = ";".join([json.dumps(rle_encode(mask1)), json.dumps(rle_encode(mask2))])
-    decoded = decode_annotation(annotation, (2, 2))
+    ann = masks_to_annotation([m1, m2])
+    decoded = annotation_to_masks(ann, m1.shape)
     assert len(decoded) == 2
-    assert np.array_equal(decoded[0], mask1)
-    assert np.array_equal(decoded[1], mask2)
+    assert np.array_equal(decoded[0], m1)
+    assert np.array_equal(decoded[1], m2)
+
+
+def test_rle_authentic_is_empty() -> None:
+    ann = masks_to_annotation([])
+    assert ann == "authentic"
+    assert annotation_to_masks(ann, (5, 6)) == []
+

@@ -1,222 +1,74 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
 
 import numpy as np
+import torch
+from PIL import Image
 
-from .frequency import compute_fft_mag
-
-
-def to_numpy(array: Any) -> np.ndarray:
-    """Convert torch tensors or numpy arrays into numpy arrays."""
-    if isinstance(array, np.ndarray):
-        return array
-    try:  # torch tensor support
-        import torch
-
-        if isinstance(array, torch.Tensor):
-            return array.detach().cpu().numpy()
-    except ImportError:
-        pass
-    raise TypeError("Unsupported array type for conversion to numpy")
+from .image import letterbox_reflect, unletterbox
+from .postprocess import PostprocessParams, postprocess_prob
+from .rle import masks_to_annotation
+from .tta import HFlipTTA, IdentityTTA, TTATransform, ZoomOutTTA, predict_with_tta
 
 
-def load_prediction(path: str | Path) -> np.ndarray:
-    """Load a saved prediction array from disk (numpy .npy)."""
-    path = Path(path)
-    return np.load(path)
+def load_rgb(path: str | Path) -> np.ndarray:
+    with Image.open(path) as img:
+        return np.array(img.convert("RGB"))
 
 
-IMAGENET_MEAN = (0.485, 0.456, 0.406)
-IMAGENET_STD = (0.229, 0.224, 0.225)
-
-
-def normalize_image(image: np.ndarray, mean=IMAGENET_MEAN, std=IMAGENET_STD) -> np.ndarray:
-    image = image.astype(np.float32)
-    if image.max() > 1.0:
-        image /= 255.0
-    mean = np.array(mean, dtype=np.float32)
-    std = np.array(std, dtype=np.float32)
-    if image.ndim != 3:
-        raise ValueError(f"Expected image with shape (H, W, C), got {image.shape}")
-    if image.shape[2] < len(mean):
-        raise ValueError(f"Expected at least {len(mean)} channels, got {image.shape[2]}")
-    out = image.copy()
-    out[..., : len(mean)] = (out[..., : len(mean)] - mean) / std
-    return out
-
-
-TTA_MODES = ("none", "hflip", "vflip", "hvflip", "rot90", "rot180", "rot270", "transpose", "antitranspose")
-
-
-def apply_tta(arr: np.ndarray, mode: str, *, axes: tuple[int, int] = (0, 1)) -> np.ndarray:
-    """
-    Apply a simple test-time augmentation to an array.
-
-    By default we assume spatial axes are (H, W) = (0, 1), which matches common HWC images and HW masks.
-    For CHW tensors, pass axes=(1, 2).
-    """
-    mode = str(mode).strip().lower()
-    if mode == "none":
-        return arr
-
-    ax0, ax1 = axes
-    if ax0 == ax1:
-        raise ValueError("axes must be two different spatial axes")
-    if arr.ndim <= max(ax0, ax1):
-        raise ValueError(f"Input array has shape {arr.shape}; cannot apply TTA on axes={axes}")
-
-    if mode == "hflip":
-        slc = [slice(None)] * arr.ndim
-        slc[ax1] = slice(None, None, -1)
-        return np.ascontiguousarray(arr[tuple(slc)])
-    if mode == "vflip":
-        slc = [slice(None)] * arr.ndim
-        slc[ax0] = slice(None, None, -1)
-        return np.ascontiguousarray(arr[tuple(slc)])
-    if mode == "hvflip":
-        slc = [slice(None)] * arr.ndim
-        slc[ax0] = slice(None, None, -1)
-        slc[ax1] = slice(None, None, -1)
-        return np.ascontiguousarray(arr[tuple(slc)])
-    if mode == "rot90":
-        return np.ascontiguousarray(np.rot90(arr, k=1, axes=axes))
-    if mode == "rot180":
-        return np.ascontiguousarray(np.rot90(arr, k=2, axes=axes))
-    if mode == "rot270":
-        return np.ascontiguousarray(np.rot90(arr, k=3, axes=axes))
-    if mode == "transpose":
-        return np.ascontiguousarray(np.swapaxes(arr, ax0, ax1))
-    if mode == "antitranspose":
-        x = np.swapaxes(arr, ax0, ax1)
-        return apply_tta(x, "hvflip", axes=axes)
-
-    raise ValueError(f"Invalid TTA mode: {mode!r}. Supported: {', '.join(TTA_MODES)}")
-
-
-def undo_tta(arr: np.ndarray, mode: str, *, axes: tuple[int, int] = (0, 1)) -> np.ndarray:
-    """Undo the augmentation applied by `apply_tta`."""
-    mode = str(mode).strip().lower()
-    if mode in {"none", "hflip", "vflip", "hvflip", "rot180"}:
-        return apply_tta(arr, mode, axes=axes)
-    if mode == "rot90":
-        return apply_tta(arr, "rot270", axes=axes)
-    if mode == "rot270":
-        return apply_tta(arr, "rot90", axes=axes)
-    if mode == "transpose":
-        return apply_tta(arr, "transpose", axes=axes)
-    if mode == "antitranspose":
-        return apply_tta(arr, "antitranspose", axes=axes)
-    raise ValueError(f"Invalid TTA mode: {mode!r}. Supported: {', '.join(TTA_MODES)}")
-
-
-def _prepare_hwc(
+@torch.no_grad()
+def predict_prob_map(
+    model: torch.nn.Module,
     image: np.ndarray,
     *,
-    mean=IMAGENET_MEAN,
-    std=IMAGENET_STD,
-    use_freq_channels: bool,
+    input_size: int,
+    device: torch.device,
+    tta_transforms: list[TTATransform] | None = None,
+    tta_weights: list[float] | None = None,
 ) -> np.ndarray:
-    image = np.asarray(image)
-    if image.ndim != 3:
-        raise ValueError(f"Expected image with shape (H, W, C), got {image.shape}")
-    if image.shape[2] < 3:
-        raise ValueError(f"Expected at least 3 channels, got {image.shape[2]}")
+    padded, meta = letterbox_reflect(image, input_size)
+    x = torch.from_numpy(padded).permute(2, 0, 1).contiguous().float() / 255.0
+    x = x.unsqueeze(0).to(device)
 
-    image_f = image.astype(np.float32)
-    if float(image_f.max()) > 1.0:
-        image_f = image_f / 255.0
+    if tta_transforms is None:
+        tta_transforms = [IdentityTTA()]
+        tta_weights = [1.0]
 
-    if use_freq_channels:
-        fft_mag = compute_fft_mag(image_f).astype(np.float32)
-
-    image_f = normalize_image(image_f, mean=mean, std=std)
-
-    if use_freq_channels:
-        image_f = np.concatenate([image_f, fft_mag], axis=2)
-
-    return image_f
+    model = model.to(device)
+    model.eval()
+    prob = predict_with_tta(model, x, transforms=tta_transforms, weights=tta_weights)[0, 0]
+    prob_np = prob.detach().cpu().numpy().astype(np.float32)
+    prob_orig = unletterbox(prob_np, meta)
+    return prob_orig
 
 
-def _tile_coords(length: int, tile_size: int, overlap: int) -> list[tuple[int, int]]:
-    stride = tile_size - overlap
-    if stride <= 0:
-        raise ValueError("tile_size must be larger than overlap")
-    if length <= tile_size:
-        return [(0, tile_size)]
-    coords = list(range(0, length - tile_size + 1, stride))
-    if coords[-1] != length - tile_size:
-        coords.append(length - tile_size)
-    return [(start, start + tile_size) for start in coords]
+def default_tta(
+    *,
+    zoom_scale: float = 0.9,
+    weights: tuple[float, float, float] = (0.5, 0.25, 0.25),
+) -> tuple[list[TTATransform], list[float]]:
+    transforms: list[TTATransform] = [IdentityTTA(), HFlipTTA(), ZoomOutTTA(scale=float(zoom_scale))]
+    return transforms, list(weights)
 
 
-def _pad_image(image: np.ndarray, target_h: int, target_w: int) -> tuple[np.ndarray, tuple[int, int]]:
-    h, w = image.shape[:2]
-    pad_h = max(target_h - h, 0)
-    pad_w = max(target_w - w, 0)
-    if pad_h == 0 and pad_w == 0:
-        return image, (0, 0)
-    padded = np.pad(image, ((0, pad_h), (0, pad_w), (0, 0)), mode="constant")
-    return padded, (pad_h, pad_w)
-
-
-def _predict_tensor(model, tensor, device):
-    import torch
-
-    tensor = tensor.to(device)
-    with torch.no_grad():
-        logits = model(tensor)
-        probs = torch.sigmoid(logits)
-    return probs
-
-
-def predict_image(
-    model,
+def predict_annotation(
+    model: torch.nn.Module,
     image: np.ndarray,
-    device,
-    tile_size: int = 0,
-    overlap: int = 0,
-    max_size: int = 0,
-    mean=IMAGENET_MEAN,
-    std=IMAGENET_STD,
-    use_freq_channels: bool = False,
-) -> np.ndarray:
-    import torch
-    import torch.nn.functional as F
-
-    orig_h, orig_w = image.shape[:2]
-
-    if tile_size and tile_size > 0:
-        padded, _ = _pad_image(image, tile_size, tile_size)
-        pad_h, pad_w = padded.shape[0], padded.shape[1]
-        pred_sum = np.zeros((pad_h, pad_w), dtype=np.float32)
-        pred_count = np.zeros((pad_h, pad_w), dtype=np.float32)
-
-        ys = _tile_coords(padded.shape[0], tile_size, overlap)
-        xs = _tile_coords(padded.shape[1], tile_size, overlap)
-        for y0, y1 in ys:
-            for x0, x1 in xs:
-                tile = padded[y0:y1, x0:x1]
-                tile_norm = _prepare_hwc(tile, mean=mean, std=std, use_freq_channels=bool(use_freq_channels))
-                tile_tensor = torch.from_numpy(tile_norm).permute(2, 0, 1).unsqueeze(0)
-                probs = _predict_tensor(model, tile_tensor, device)
-                prob_tile = probs.squeeze(0).squeeze(0).cpu().numpy()
-                pred_sum[y0:y1, x0:x1] += prob_tile
-                pred_count[y0:y1, x0:x1] += 1.0
-
-        pred = pred_sum / np.maximum(pred_count, 1.0)
-        return pred[:orig_h, :orig_w]
-
-    image_norm = _prepare_hwc(image, mean=mean, std=std, use_freq_channels=bool(use_freq_channels))
-    tensor = torch.from_numpy(image_norm).permute(2, 0, 1).unsqueeze(0)
-    if max_size and max(orig_h, orig_w) > max_size:
-        scale = max_size / float(max(orig_h, orig_w))
-        new_h = int(round(orig_h * scale))
-        new_w = int(round(orig_w * scale))
-        tensor = F.interpolate(tensor, size=(new_h, new_w), mode="bilinear", align_corners=False)
-
-    probs = _predict_tensor(model, tensor, device)
-    if probs.shape[-2:] != (orig_h, orig_w):
-        probs = F.interpolate(probs, size=(orig_h, orig_w), mode="bilinear", align_corners=False)
-    return probs.squeeze(0).squeeze(0).cpu().numpy()
+    *,
+    input_size: int,
+    device: torch.device,
+    post: PostprocessParams,
+    tta_transforms: list[TTATransform] | None = None,
+    tta_weights: list[float] | None = None,
+) -> str:
+    prob = predict_prob_map(
+        model,
+        image,
+        input_size=input_size,
+        device=device,
+        tta_transforms=tta_transforms,
+        tta_weights=tta_weights,
+    )
+    instances = postprocess_prob(prob, post)
+    return masks_to_annotation(instances)

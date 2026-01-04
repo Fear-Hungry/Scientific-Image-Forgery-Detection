@@ -1,381 +1,121 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Optional, Sequence
+from typing import Callable, Literal, NamedTuple
 
 import numpy as np
+import torch
+from PIL import Image
+from torch.utils.data import Dataset
 
-from .augment import IMAGENET_MEAN, IMAGENET_STD
-from .frequency import compute_fft_mag
+from .typing import Case, Pathish, Split
 
 
-@dataclass(frozen=True)
-class Sample:
+class RecodaiSample(NamedTuple):
     case_id: str
-    image_path: Path
-    mask_path: Optional[Path]
-    is_authentic: Optional[bool]
-    split: str
-    label: Optional[str]
-    rel_path: Path
+    image: torch.Tensor  # (3, H, W), float32 in [0, 1]
+    mask: torch.Tensor  # (1, H, W), float32 in {0, 1}
+    is_forged: bool
 
 
-def build_train_index(data_root: str | Path, strict: bool = False) -> List[Sample]:
-    data_root = Path(data_root)
-    train_root = data_root / "train_images"
-    mask_root = data_root / "train_masks"
+def list_cases(
+    data_root: Pathish,
+    split: Split,
+    *,
+    include_authentic: bool = True,
+    include_forged: bool = True,
+) -> list[Case]:
+    root = Path(data_root)
+    cases: list[Case] = []
 
-    samples: List[Sample] = []
-    for label in ("authentic", "forged"):
-        for image_path in sorted((train_root / label).glob("*.png")):
-            case_id = image_path.stem
-            mask_path = None
-            if label == "forged":
-                candidate = mask_root / f"{case_id}.npy"
-                if candidate.exists():
-                    mask_path = candidate
-                elif strict:
-                    raise FileNotFoundError(f"Missing mask for {case_id}")
-            samples.append(
-                Sample(
-                    case_id=case_id,
-                    image_path=image_path,
-                    mask_path=mask_path,
-                    is_authentic=(label == "authentic"),
-                    split="train",
-                    label=label,
-                    rel_path=image_path.relative_to(data_root),
-                )
-            )
-    return samples
+    if split == "train":
+        if include_authentic:
+            for img_path in sorted((root / "train_images" / "authentic").glob("*.png")):
+                cases.append(Case(case_id=img_path.stem, image_path=img_path, mask_path=None))
+        if include_forged:
+            for img_path in sorted((root / "train_images" / "forged").glob("*.png")):
+                mask_path = root / "train_masks" / f"{img_path.stem}.npy"
+                cases.append(Case(case_id=img_path.stem, image_path=img_path, mask_path=mask_path))
 
+    elif split == "supplemental":
+        if include_authentic:
+            for img_path in sorted((root / "supplemental_images" / "authentic").glob("*.png")):
+                cases.append(Case(case_id=img_path.stem, image_path=img_path, mask_path=None))
+        if include_forged:
+            for img_path in sorted((root / "supplemental_images" / "forged").glob("*.png")):
+                mask_path = root / "supplemental_masks" / f"{img_path.stem}.npy"
+                cases.append(Case(case_id=img_path.stem, image_path=img_path, mask_path=mask_path))
 
-def build_supplemental_index(data_root: str | Path, strict: bool = False) -> List[Sample]:
-    data_root = Path(data_root)
-    image_root = data_root / "supplemental_images"
-    mask_root = data_root / "supplemental_masks"
+    elif split == "test":
+        for img_path in sorted((root / "test_images").glob("*.png")):
+            cases.append(Case(case_id=img_path.stem, image_path=img_path, mask_path=None))
 
-    samples: List[Sample] = []
-    for image_path in sorted(image_root.glob("*.png")):
-        case_id = image_path.stem
-        mask_path = None
-        candidate = mask_root / f"{case_id}.npy"
-        if candidate.exists():
-            mask_path = candidate
-        elif strict:
-            raise FileNotFoundError(f"Missing supplemental mask for {case_id}")
-        samples.append(
-            Sample(
-                case_id=case_id,
-                image_path=image_path,
-                mask_path=mask_path,
-                is_authentic=False if mask_path is not None else None,
-                split="supplemental",
-                label=None,
-                rel_path=image_path.relative_to(data_root),
-            )
-        )
-    return samples
-
-
-def build_test_index(data_root: str | Path) -> List[Sample]:
-    data_root = Path(data_root)
-    test_root = data_root / "test_images"
-
-    samples: List[Sample] = []
-    for image_path in sorted(test_root.glob("*.png")):
-        case_id = image_path.stem
-        samples.append(
-            Sample(
-                case_id=case_id,
-                image_path=image_path,
-                mask_path=None,
-                is_authentic=None,
-                split="test",
-                label=None,
-                rel_path=image_path.relative_to(data_root),
-            )
-        )
-    return samples
-
-
-def load_image(image_path: str | Path, as_rgb: bool = True) -> np.ndarray:
-    from PIL import Image
-
-    image_path = Path(image_path)
-    with Image.open(image_path) as img:
-        if as_rgb:
-            img = img.convert("RGB")
-        return np.array(img)
-
-
-def load_mask_instances(mask_path: str | Path) -> List[np.ndarray]:
-    mask_path = Path(mask_path)
-    masks = np.load(mask_path)
-    if masks.ndim == 2:
-        masks = masks[None, ...]
-    instances = [(m > 0).astype(np.uint8) for m in masks]
-    return instances
-
-
-def load_union_mask(mask_path: Optional[Path], shape: tuple[int, int]) -> np.ndarray:
-    if mask_path is None:
-        return np.zeros(shape, dtype=np.uint8)
-    masks = np.load(mask_path)
-    if masks.ndim == 2:
-        union = masks
     else:
-        union = masks.max(axis=0)
-    union = (union > 0).astype(np.uint8)
-    if union.shape != shape:
-        raise ValueError(f"Mask shape {union.shape} does not match image shape {shape}")
-    return union
+        raise ValueError(f"Unknown split: {split}")
+
+    return cases
 
 
-def _pad_to_size(image: np.ndarray, mask: np.ndarray, target_h: int, target_w: int) -> tuple[np.ndarray, np.ndarray]:
-    h, w = mask.shape
-    pad_h = max(target_h - h, 0)
-    pad_w = max(target_w - w, 0)
-    if pad_h == 0 and pad_w == 0:
-        return image, mask
-    image_pad = np.pad(image, ((0, pad_h), (0, pad_w), (0, 0)), mode="constant")
-    mask_pad = np.pad(mask, ((0, pad_h), (0, pad_w)), mode="constant")
-    return image_pad, mask_pad
+def load_mask_instances(mask_path: Path) -> list[np.ndarray]:
+    masks = np.load(mask_path)
+    if masks.ndim != 3:
+        raise ValueError(f"Expected (N, H, W) mask array, got shape={masks.shape} at {mask_path}")
+    return [m.astype(np.uint8) for m in masks]
 
 
-def _random_crop(
-    image: np.ndarray,
-    mask: np.ndarray,
-    crop_h: int,
-    crop_w: int,
-    rng: np.random.Generator,
-) -> tuple[np.ndarray, np.ndarray]:
-    h, w = mask.shape
-    if h == crop_h and w == crop_w:
-        return image, mask
-    top = int(rng.integers(0, h - crop_h + 1))
-    left = int(rng.integers(0, w - crop_w + 1))
-    return image[top : top + crop_h, left : left + crop_w], mask[top : top + crop_h, left : left + crop_w]
+def union_mask(instances: list[np.ndarray], *, shape: tuple[int, int] | None = None) -> np.ndarray:
+    if len(instances) == 0:
+        if shape is None:
+            raise ValueError("shape is required when instances is empty")
+        return np.zeros(shape, dtype=np.uint8)
+    stacked = np.stack(instances, axis=0).astype(bool)
+    return np.any(stacked, axis=0).astype(np.uint8)
 
 
-def _center_crop(image: np.ndarray, mask: np.ndarray, crop_h: int, crop_w: int) -> tuple[np.ndarray, np.ndarray]:
-    h, w = mask.shape
-    top = max((h - crop_h) // 2, 0)
-    left = max((w - crop_w) // 2, 0)
-    return image[top : top + crop_h, left : left + crop_w], mask[top : top + crop_h, left : left + crop_w]
-
-
-def _positive_crop(
-    image: np.ndarray,
-    mask: np.ndarray,
-    crop_h: int,
-    crop_w: int,
-    rng: np.random.Generator,
-    max_tries: int,
-    min_pos_pixels: int,
-) -> tuple[np.ndarray, np.ndarray]:
-    ys, xs = np.where(mask > 0)
-    if len(ys) == 0:
-        return _random_crop(image, mask, crop_h, crop_w, rng)
-
-    h, w = mask.shape
-    for _ in range(max_tries):
-        idx = int(rng.integers(0, len(ys)))
-        center_y = int(ys[idx])
-        center_x = int(xs[idx])
-        top = max(min(center_y - crop_h // 2, h - crop_h), 0)
-        left = max(min(center_x - crop_w // 2, w - crop_w), 0)
-        crop_mask = mask[top : top + crop_h, left : left + crop_w]
-        if int(crop_mask.sum()) >= min_pos_pixels:
-            return image[top : top + crop_h, left : left + crop_w], crop_mask
-    return _random_crop(image, mask, crop_h, crop_w, rng)
-
-
-class PatchDataset:
+class RecodaiDataset(Dataset[RecodaiSample]):
     def __init__(
         self,
-        samples: List[Sample],
-        patch_size: int | tuple[int, int] = 512,
-        train: bool = True,
-        augment=None,
-        positive_prob: float = 0.7,
-        min_pos_pixels: int = 1,
-        max_tries: int = 10,
-        seed: int = 42,
-        return_meta: bool = False,
-        mean=IMAGENET_MEAN,
-        std=IMAGENET_STD,
-        normalize: bool = True,
-        use_freq_channels: bool = False,
-    ) -> None:
-        self.samples = samples
-        if isinstance(patch_size, int):
-            patch_size = (patch_size, patch_size)
-        self.patch_size = patch_size
-        self.train = train
-        self.augment = augment
-        self.positive_prob = positive_prob
-        self.min_pos_pixels = min_pos_pixels
-        self.max_tries = max_tries
-        self.seed = seed
-        self.return_meta = return_meta
-        self.mean = np.array(mean, dtype=np.float32)
-        self.std = np.array(std, dtype=np.float32)
-        self.normalize = normalize
-        self.use_freq_channels = use_freq_channels
-
-    def __len__(self) -> int:
-        return len(self.samples)
-
-    def __getitem__(self, idx: int):
-        import torch
-
-        sample = self.samples[idx]
-        worker_info = torch.utils.data.get_worker_info()
-        worker_id = worker_info.id if worker_info is not None else 0
-        rng = np.random.default_rng(self.seed + idx + worker_id * 100000)
-        image = load_image(sample.image_path)
-        mask = load_union_mask(sample.mask_path, image.shape[:2])
-
-        crop_h, crop_w = self.patch_size
-        image, mask = _pad_to_size(image, mask, crop_h, crop_w)
-        if self.train:
-            wants_positive = (sample.is_authentic is False) and (rng.random() < self.positive_prob)
-            if wants_positive:
-                image, mask = _positive_crop(
-                    image,
-                    mask,
-                    crop_h,
-                    crop_w,
-                    rng,
-                    self.max_tries,
-                    self.min_pos_pixels,
-                )
-            else:
-                image, mask = _random_crop(image, mask, crop_h, crop_w, rng)
-        else:
-            image, mask = _center_crop(image, mask, crop_h, crop_w)
-
-        if self.augment is not None:
-            augmented = self.augment(image=image, mask=mask)
-            image = augmented["image"]
-            mask = augmented["mask"]
-
-        image = np.asarray(image)
-        image_f = image.astype(np.float32)
-        if float(image_f.max()) > 1.0:
-            image_f = image_f / 255.0
-
-        if self.use_freq_channels:
-            fft_mag = compute_fft_mag(image_f).astype(np.float32)
-
-        if self.normalize:
-            image_f = (image_f - self.mean) / self.std
-
-        if self.use_freq_channels:
-            image_f = np.concatenate([image_f, fft_mag], axis=2)
-
-        image_f = np.transpose(image_f, (2, 0, 1))
-        mask = mask.astype(np.float32)[None, ...]
-
-        image_tensor = torch.from_numpy(image_f)
-        mask_tensor = torch.from_numpy(mask)
-
-        if self.return_meta:
-            return image_tensor, mask_tensor, sample
-        return image_tensor, mask_tensor
-
-
-class DinoSegDataset:
-    """
-    Minimal dataset for the "DINO-only" notebook path.
-
-    - Loads RGB images.
-    - Resizes image + union mask to a fixed square `image_size`.
-    - Applies lightweight geometric augmentation during training.
-    """
-
-    def __init__(
-        self,
-        samples: Sequence[Sample],
-        image_size: int,
+        data_root: Pathish,
+        split: Split,
         *,
-        train: bool,
-        seed: int = 42,
-        p_hflip: float = 0.5,
-        p_vflip: float = 0.5,
-        p_rot90: float = 0.25,
+        include_authentic: bool = True,
+        include_forged: bool = True,
+        transforms: Callable[[np.ndarray, np.ndarray], tuple[np.ndarray, np.ndarray]] | None = None,
+        image_mode: Literal["rgb", "l"] = "rgb",
     ) -> None:
-        self.samples = list(samples)
-        self.image_size = int(image_size)
-        self.train = bool(train)
-        self.seed = int(seed)
-        self.p_hflip = float(p_hflip)
-        self.p_vflip = float(p_vflip)
-        self.p_rot90 = float(p_rot90)
+        self.data_root = Path(data_root)
+        self.split = split
+        self.cases = list_cases(
+            self.data_root,
+            split,
+            include_authentic=include_authentic,
+            include_forged=include_forged,
+        )
+        self.transforms = transforms
+        self.image_mode = image_mode
 
     def __len__(self) -> int:
-        return len(self.samples)
+        return len(self.cases)
 
-    def _load_union_mask_resized(self, mask_path: Optional[Path]) -> np.ndarray:
-        import cv2
+    def __getitem__(self, idx: int) -> RecodaiSample:
+        case = self.cases[idx]
+        with Image.open(case.image_path) as img:
+            img = img.convert("RGB" if self.image_mode == "rgb" else "L")
+            image = np.array(img)
+        if self.image_mode == "l":
+            image = np.repeat(image[..., None], 3, axis=2)
 
-        out_size = int(self.image_size)
-        if mask_path is None:
-            return np.zeros((out_size, out_size), dtype=np.uint8)
-        masks = np.load(mask_path)
-        if masks.ndim == 2:
-            union = masks
+        if case.mask_path is None:
+            mask = np.zeros(image.shape[:2], dtype=np.uint8)
+            is_forged = False
         else:
-            union = masks.max(axis=0)
-        union = (union > 0).astype(np.uint8)
-        if union.shape != (out_size, out_size):
-            union = cv2.resize(union, (out_size, out_size), interpolation=cv2.INTER_NEAREST)
-        return union
+            instances = load_mask_instances(case.mask_path)
+            mask = union_mask(instances, shape=image.shape[:2])
+            is_forged = True
 
-    def __getitem__(self, idx: int):
-        import torch
-        import cv2
+        if self.transforms is not None:
+            image, mask = self.transforms(image, mask)
 
-        sample = self.samples[int(idx)]
-        image = load_image(sample.image_path, as_rgb=True)
-        image = cv2.resize(image, (self.image_size, self.image_size), interpolation=cv2.INTER_AREA)
-        mask = self._load_union_mask_resized(sample.mask_path)
-
-        if self.train:
-            worker_info = torch.utils.data.get_worker_info()
-            worker_id = worker_info.id if worker_info is not None else 0
-            rng = np.random.default_rng(self.seed + idx + worker_id * 100000)
-            if rng.random() < self.p_hflip:
-                image = np.ascontiguousarray(image[:, ::-1])
-                mask = np.ascontiguousarray(mask[:, ::-1])
-            if rng.random() < self.p_vflip:
-                image = np.ascontiguousarray(image[::-1, :])
-                mask = np.ascontiguousarray(mask[::-1, :])
-            if rng.random() < self.p_rot90:
-                image = np.ascontiguousarray(np.rot90(image, k=1))
-                mask = np.ascontiguousarray(np.rot90(mask, k=1))
-
-        image = torch.from_numpy(image).permute(2, 0, 1).float() / 255.0
-        mask = torch.from_numpy(mask).unsqueeze(0).float()
-        return image, mask
-
-
-class ClsDataset:
-    def __init__(self, samples: Sequence[Sample], transform):
-        self.samples = list(samples)
-        self.transform = transform
-
-    def __len__(self) -> int:
-        return len(self.samples)
-
-    def __getitem__(self, idx: int):
-        import torch
-        from PIL import Image
-
-        s = self.samples[int(idx)]
-        img = Image.open(s.image_path).convert("RGB")
-        x = self.transform(img)
-        y = torch.tensor([0.0 if s.is_authentic else 1.0], dtype=torch.float32)
-        return x, y
+        image_t = torch.from_numpy(image).permute(2, 0, 1).contiguous().float() / 255.0
+        mask_t = torch.from_numpy(mask[None, ...].astype(np.float32)).contiguous()
+        return RecodaiSample(case_id=case.case_id, image=image_t, mask=mask_t, is_forged=is_forged)

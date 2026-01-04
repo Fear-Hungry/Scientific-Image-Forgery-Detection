@@ -1,1 +1,0 @@
-AUTHENTIC_LABEL = "authentic"

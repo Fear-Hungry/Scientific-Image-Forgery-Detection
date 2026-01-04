@@ -1,0 +1,14 @@
+{
+  "name": "fft_cls_logmag_256",
+  "fft": {
+    "mode": "logmag",
+    "input_size": 256,
+    "hp_radius_fraction": 0.1,
+    "normalize_percentiles": [5.0, 95.0]
+  },
+  "model": {
+    "backbone": "resnet18",
+    "dropout": 0.0
+  }
+}
+

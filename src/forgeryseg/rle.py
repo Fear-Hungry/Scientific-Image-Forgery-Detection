@@ -1,111 +1,68 @@
 from __future__ import annotations
 
 import json
-from typing import Iterable, List, Sequence
+from typing import Iterable, Sequence
 
 import numpy as np
 
-from .constants import AUTHENTIC_LABEL
+
+def _encode_single(mask: np.ndarray) -> list[int]:
+    if mask.ndim != 2:
+        raise ValueError(f"mask must be 2D, got shape={mask.shape}")
+    mask = (mask > 0).astype(np.uint8)
+    dots = np.where(mask.flatten(order="F") == 1)[0]
+    run_lengths: list[int] = []
+    prev = -2
+    for b in dots:
+        b = int(b)
+        if b > prev + 1:
+            run_lengths.extend((int(b + 1), 0))  # 1-based starts
+        run_lengths[-1] += 1
+        prev = b
+    return run_lengths
 
 
-def _normalize_mask(mask: np.ndarray) -> np.ndarray:
-    arr = np.asarray(mask)
-    if arr.ndim != 2:
-        raise ValueError(f"Expected 2D mask, got shape {arr.shape}")
-    return (arr > 0).astype(np.uint8)
+def masks_to_annotation(masks: Sequence[np.ndarray]) -> str:
+    cleaned = [(m > 0).astype(np.uint8) for m in masks if m is not None and np.any(m)]
+    if not cleaned:
+        return "authentic"
+    return ";".join(json.dumps(_encode_single(m)) for m in cleaned)
 
 
-def rle_encode(mask: np.ndarray) -> List[int]:
-    """
-    Encode a single binary mask using Kaggle-style RLE.
-
-    - Column-major order (Fortran / mask.T.flatten())
-    - 1-indexed start positions
-    """
-    mask = _normalize_mask(mask)
-    if mask.max() == 0:
-        return []
-
-    pixels = mask.flatten(order="F")
-    pixels = np.concatenate([[0], pixels, [0]])
-    changes = np.where(pixels[1:] != pixels[:-1])[0] + 1
-    changes[1::2] -= changes[::2]
-    return changes.tolist()
-
-
-def rle_decode(rle: Sequence[int] | str | None, shape: tuple[int, int]) -> np.ndarray:
-    """Decode a single RLE list or string into a binary mask."""
-    if rle is None:
-        return np.zeros(shape, dtype=np.uint8)
-
-    if isinstance(rle, str):
-        text = rle.strip()
-        if text == "" or text.lower() == AUTHENTIC_LABEL:
-            return np.zeros(shape, dtype=np.uint8)
-        if text.startswith("["):
-            rle = json.loads(text)
-        else:
-            rle = [int(x) for x in text.split()]
-
-    rle = list(rle)
+def _decode_single(rle: list[int], shape: tuple[int, int]) -> np.ndarray:
     if len(rle) % 2 != 0:
-        raise ValueError("RLE length must be even (start, length pairs)")
-
-    mask = np.zeros(shape[0] * shape[1], dtype=np.uint8)
-    for start, length in zip(rle[0::2], rle[1::2]):
+        raise ValueError(f"RLE length must be even, got {len(rle)}")
+    h, w = shape
+    flat = np.zeros(h * w, dtype=np.uint8)
+    for start, length in zip(rle[0::2], rle[1::2], strict=True):
         if length <= 0:
             continue
-        start_index = int(start) - 1
-        end_index = start_index + int(length)
-        mask[start_index:end_index] = 1
-
-    return mask.reshape(shape, order="F")
-
-
-def _normalize_instances(masks: Iterable[np.ndarray] | np.ndarray | None) -> List[np.ndarray]:
-    if masks is None:
-        return []
-    if isinstance(masks, np.ndarray):
-        if masks.ndim == 2:
-            return [_normalize_mask(masks)]
-        if masks.ndim == 3:
-            return [_normalize_mask(m) for m in masks]
-    if isinstance(masks, (list, tuple)):
-        return [_normalize_mask(m) for m in masks]
-    raise ValueError("Unsupported mask container for RLE encoding")
+        start0 = int(start) - 1
+        end = start0 + int(length)
+        flat[start0:end] = 1
+    return flat.reshape((h, w), order="F")
 
 
-def encode_instances(masks: Iterable[np.ndarray] | np.ndarray | None) -> str:
-    """
-    Encode a list/array of instance masks into the competition annotation string.
-    Returns "authentic" if no positive pixels are found.
-    """
-    instances = _normalize_instances(masks)
-    parts: List[str] = []
-    for mask in instances:
-        runs = rle_encode(mask)
-        if runs:
-            parts.append(json.dumps(runs))
-
-    if not parts:
-        return AUTHENTIC_LABEL
-
-    return ";".join(parts)
-
-
-def decode_annotation(annotation: str | None, shape: tuple[int, int]) -> List[np.ndarray]:
-    """Decode an annotation string into a list of instance masks."""
+def annotation_to_masks(annotation: str | float | None, shape: tuple[int, int]) -> list[np.ndarray]:
     if annotation is None:
         return []
-
-    text = annotation.strip()
-    if text == "" or text.lower() == AUTHENTIC_LABEL:
+    if isinstance(annotation, float) and np.isnan(annotation):
+        return []
+    ann = str(annotation).strip()
+    if not ann or ann.lower() == "authentic":
         return []
 
-    masks = []
-    for part in text.split(";"):
-        part = part.strip()
-        if not part:
-            continue
-        masks.append(rle_decode(part, shape))
+    parts = [p.strip() for p in ann.split(";") if p.strip()]
+    masks: list[np.ndarray] = []
+    for part in parts:
+        rle = json.loads(part)
+        masks.append(_decode_single(rle, shape))
     return masks
+
+
+def annotation_to_union_mask(annotation: str | float | None, shape: tuple[int, int]) -> np.ndarray:
+    masks = annotation_to_masks(annotation, shape)
+    if not masks:
+        return np.zeros(shape, dtype=np.uint8)
+    stacked = np.stack(masks, axis=0).astype(bool)
+    return np.any(stacked, axis=0).astype(np.uint8)

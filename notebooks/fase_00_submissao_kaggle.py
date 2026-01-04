@@ -165,10 +165,12 @@ def _warn_state_dict(missing: list[str], unexpected: list[str]) -> None:
 
 
 def _load_segmentation_model(cfg: dict, *, device: torch.device) -> torch.nn.Module:
+    ckpt = cfg.get("checkpoint")
     enc_cfg = cfg.get("encoder", {})
     encoder = DinoV2EncoderSpec(
         model_name=enc_cfg.get("model_name", "vit_base_patch14_dinov2"),
         checkpoint_path=enc_cfg.get("checkpoint_path"),
+        pretrained=bool(enc_cfg.get("pretrained", False)) and not bool(ckpt),
     )
 
     model_type = str(cfg.get("model_type", "dinov2"))
@@ -189,7 +191,6 @@ def _load_segmentation_model(cfg: dict, *, device: torch.device) -> torch.nn.Mod
             freeze_encoder=bool(cfg.get("freeze_encoder", True)),
         )
 
-    ckpt = cfg.get("checkpoint")
     if ckpt:
         ckpt_path = _resolve_maybe_in_kaggle_input(ckpt)
         if not ckpt_path.exists():

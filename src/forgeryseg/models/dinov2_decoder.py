@@ -38,6 +38,7 @@ class DinoTinyDecoder(nn.Module):
 class DinoV2EncoderSpec:
     model_name: str = "vit_base_patch14_dinov2"
     checkpoint_path: str | Path | None = None
+    pretrained: bool = False
 
 
 class DinoV2SegmentationModel(nn.Module):
@@ -53,7 +54,7 @@ class DinoV2SegmentationModel(nn.Module):
 
         self.encoder = timm.create_model(
             encoder.model_name,
-            pretrained=False,
+            pretrained=bool(encoder.pretrained) and encoder.checkpoint_path is None,
             checkpoint_path=str(encoder.checkpoint_path) if encoder.checkpoint_path else "",
             num_classes=0,
             dynamic_img_size=True,

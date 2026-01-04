@@ -3,7 +3,8 @@
   "input_size": 718,
   "encoder": {
     "model_name": "vit_base_patch14_dinov2",
-    "checkpoint_path": null
+    "checkpoint_path": null,
+    "pretrained": true
   },
   "checkpoint": "outputs/models/u52.pth",
   "decoder_hidden_channels": 256,
@@ -28,4 +29,3 @@
     "authentic_conf_max": null
   }
 }
-

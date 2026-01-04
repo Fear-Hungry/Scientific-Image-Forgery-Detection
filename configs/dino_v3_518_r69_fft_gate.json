@@ -3,7 +3,8 @@
   "input_size": 518,
   "encoder": {
     "model_name": "vit_base_patch14_reg4_dinov2",
-    "checkpoint_path": null
+    "checkpoint_path": null,
+    "pretrained": true
   },
   "checkpoint": "outputs/models/r69.pth",
   "decoder_hidden_channels": 256,
@@ -41,4 +42,3 @@
     }
   }
 }
-

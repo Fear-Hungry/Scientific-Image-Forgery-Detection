@@ -45,7 +45,7 @@ class DinoV2FreqFusionSegmentationModel(nn.Module):
 
         self.encoder = timm.create_model(
             encoder.model_name,
-            pretrained=False,
+            pretrained=bool(encoder.pretrained) and encoder.checkpoint_path is None,
             checkpoint_path=str(encoder.checkpoint_path) if encoder.checkpoint_path else "",
             num_classes=0,
             dynamic_img_size=True,

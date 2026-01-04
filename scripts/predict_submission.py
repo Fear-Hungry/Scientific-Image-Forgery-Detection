@@ -42,10 +42,12 @@ def main() -> None:
     cfg = json.loads(args.config.read_text())
     input_size = int(cfg["input_size"])
 
+    ckpt = cfg.get("checkpoint")
     enc_cfg = cfg.get("encoder", {})
     encoder = DinoV2EncoderSpec(
         model_name=enc_cfg.get("model_name", "vit_base_patch14_dinov2"),
         checkpoint_path=enc_cfg.get("checkpoint_path"),
+        pretrained=bool(enc_cfg.get("pretrained", False)) and not bool(ckpt),
     )
     model_type = str(cfg.get("model_type", "dinov2"))
     if model_type == "dinov2_freq_fusion":
@@ -65,7 +67,6 @@ def main() -> None:
             freeze_encoder=bool(cfg.get("freeze_encoder", True)),
         )
 
-    ckpt = cfg.get("checkpoint")
     if ckpt:
         missing, unexpected = load_flexible_state_dict(model, Path(ckpt))
         _warn_state_dict(missing, unexpected)

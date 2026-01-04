@@ -20,6 +20,7 @@ python scripts/predict_submission.py --config configs/dino_v3_518_r69_fft_gate.j
 
 - Rode `notebooks/fase_00_submissao_kaggle.ipynb` (anexe o dataset da competição + um dataset com este repo + um dataset com `outputs/models/*.pth`).
 - Saída: `/kaggle/working/submission.csv`
+- Guia completo: `docs/KAGGLE.md`
 
 ## Sumário
 

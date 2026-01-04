@@ -24,22 +24,26 @@ def _seed_everything(seed: int) -> None:
     torch.manual_seed(seed)
 
 
-def _make_transforms(input_size: int):
+def _make_transforms(input_size: int, *, train: bool):
     import albumentations as A
     import cv2
 
-    aug = A.Compose(
-        [
-            A.LongestMaxSize(max_size=input_size, interpolation=cv2.INTER_AREA),
-            A.PadIfNeeded(
-                min_height=input_size,
-                min_width=input_size,
-                border_mode=cv2.BORDER_REFLECT_101,
-            ),
-            A.HorizontalFlip(p=0.5),
-            A.RandomBrightnessContrast(p=0.25),
-        ]
-    )
+    base = [
+        A.LongestMaxSize(max_size=input_size, interpolation=cv2.INTER_AREA),
+        A.PadIfNeeded(
+            min_height=input_size,
+            min_width=input_size,
+            border_mode=cv2.BORDER_REFLECT_101,
+        ),
+    ]
+    if train:
+        base.extend(
+            [
+                A.HorizontalFlip(p=0.5),
+                A.RandomBrightnessContrast(p=0.25),
+            ]
+        )
+    aug = A.Compose(base)
 
     def _apply(img: np.ndarray, mask: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         out = aug(image=img, mask=mask)
@@ -76,6 +80,8 @@ def main() -> None:
     ap.add_argument("--seed", type=int, default=42)
     args = ap.parse_args()
 
+    _seed_everything(int(args.seed))
+
     cfg = json.loads(args.config.read_text())
     input_size = int(cfg["input_size"])
 
@@ -83,16 +89,23 @@ def main() -> None:
     encoder = DinoV2EncoderSpec(
         model_name=enc_cfg.get("model_name", "vit_base_patch14_dinov2"),
         checkpoint_path=enc_cfg.get("checkpoint_path"),
+        pretrained=bool(enc_cfg.get("pretrained", False)),
     )
 
     model_type = str(cfg.get("model_type", "dinov2"))
+    freeze_encoder = bool(cfg.get("freeze_encoder", True))
+    if freeze_encoder and encoder.checkpoint_path is None and not encoder.pretrained:
+        raise ValueError(
+            "freeze_encoder=true mas encoder não está pré-treinado. "
+            "Defina encoder.pretrained=true (requer internet/cache) ou forneça encoder.checkpoint_path."
+        )
     if model_type == "dinov2_freq_fusion":
         freq = FreqFusionSpec(**cfg.get("freq_fusion", {}))
         model = DinoV2FreqFusionSegmentationModel(
             encoder,
             decoder_hidden_channels=int(cfg.get("decoder_hidden_channels", 256)),
             decoder_dropout=float(cfg.get("decoder_dropout", 0.0)),
-            freeze_encoder=bool(cfg.get("freeze_encoder", True)),
+            freeze_encoder=freeze_encoder,
             freq=freq,
         )
     else:
@@ -100,24 +113,45 @@ def main() -> None:
             encoder,
             decoder_hidden_channels=int(cfg.get("decoder_hidden_channels", 256)),
             decoder_dropout=float(cfg.get("decoder_dropout", 0.0)),
-            freeze_encoder=bool(cfg.get("freeze_encoder", True)),
+            freeze_encoder=freeze_encoder,
         )
 
-    _seed_everything(int(args.seed))
-    ds = RecodaiDataset(
+    ds_train = RecodaiDataset(
         args.data_root,
         "train",
         include_authentic=True,
         include_forged=True,
-        transforms=_make_transforms(input_size),
+        transforms=_make_transforms(input_size, train=True),
+    )
+    ds_val = RecodaiDataset(
+        args.data_root,
+        "train",
+        include_authentic=True,
+        include_forged=True,
+        transforms=_make_transforms(input_size, train=False),
     )
 
-    indices = np.random.permutation(len(ds))
-    n_val = int(round(len(indices) * float(args.val_fraction)))
-    val_idx = indices[:n_val].tolist()
-    train_idx = indices[n_val:].tolist()
-    train_ds = Subset(ds, train_idx)
-    val_ds = Subset(ds, val_idx)
+    val_fraction = float(args.val_fraction)
+    if not (0.0 < val_fraction < 1.0):
+        raise ValueError("--val-fraction must be between 0 and 1")
+
+    labels = np.asarray([1 if c.mask_path is not None else 0 for c in ds_train.cases], dtype=np.int64)
+    try:
+        from sklearn.model_selection import StratifiedShuffleSplit
+
+        splitter = StratifiedShuffleSplit(n_splits=1, test_size=val_fraction, random_state=int(args.seed))
+        train_idx_np, val_idx_np = next(splitter.split(np.zeros(len(labels)), labels))
+        train_idx = train_idx_np.tolist()
+        val_idx = val_idx_np.tolist()
+    except Exception as e:
+        print(f"[warn] stratified split failed ({type(e).__name__}: {e}); falling back to random split")
+        indices = np.random.permutation(len(labels))
+        n_val = int(round(len(indices) * val_fraction))
+        val_idx = indices[:n_val].tolist()
+        train_idx = indices[n_val:].tolist()
+
+    train_ds = Subset(ds_train, train_idx)
+    val_ds = Subset(ds_val, val_idx)
 
     train_loader = DataLoader(
         train_ds,

@@ -68,6 +68,8 @@ def main() -> None:
     ap.add_argument("--no-aug", action="store_true")
     args = ap.parse_args()
 
+    _seed_everything(int(args.seed))
+
     cfg = json.loads(args.config.read_text())
     fft_params = FFTParams(**cfg.get("fft", {}))
 
@@ -78,8 +80,7 @@ def main() -> None:
         dropout=float(model_cfg.get("dropout", 0.0)),
     )
 
-    _seed_everything(int(args.seed))
-    ds = RecodaiFFTDataset(
+    ds_train = RecodaiFFTDataset(
         args.data_root,
         "train",
         fft_params=fft_params,
@@ -87,13 +88,36 @@ def main() -> None:
         include_forged=True,
         image_transforms=None if args.no_aug else _augment,
     )
+    ds_val = RecodaiFFTDataset(
+        args.data_root,
+        "train",
+        fft_params=fft_params,
+        include_authentic=True,
+        include_forged=True,
+        image_transforms=None,
+    )
 
-    indices = np.random.permutation(len(ds))
-    n_val = int(round(len(indices) * float(args.val_fraction)))
-    val_idx = indices[:n_val].tolist()
-    train_idx = indices[n_val:].tolist()
-    train_ds = Subset(ds, train_idx)
-    val_ds = Subset(ds, val_idx)
+    val_fraction = float(args.val_fraction)
+    if not (0.0 < val_fraction < 1.0):
+        raise ValueError("--val-fraction must be between 0 and 1")
+
+    labels = np.asarray([1 if c.mask_path is not None else 0 for c in ds_train.cases], dtype=np.int64)
+    try:
+        from sklearn.model_selection import StratifiedShuffleSplit
+
+        splitter = StratifiedShuffleSplit(n_splits=1, test_size=val_fraction, random_state=int(args.seed))
+        train_idx_np, val_idx_np = next(splitter.split(np.zeros(len(labels)), labels))
+        train_idx = train_idx_np.tolist()
+        val_idx = val_idx_np.tolist()
+    except Exception as e:
+        print(f"[warn] stratified split failed ({type(e).__name__}: {e}); falling back to random split")
+        indices = np.random.permutation(len(labels))
+        n_val = int(round(len(indices) * val_fraction))
+        val_idx = indices[:n_val].tolist()
+        train_idx = indices[n_val:].tolist()
+
+    train_ds = Subset(ds_train, train_idx)
+    val_ds = Subset(ds_val, val_idx)
 
     train_loader = DataLoader(
         train_ds,
@@ -141,4 +165,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

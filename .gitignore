@@ -15,6 +15,9 @@ logs/
 weights_cache/hf/
 weights_cache/torch/
 
+# Agent instructions (keep local only)
+/AGENTS.md
+
 # Local datasets
 /data/**
 !data/README.md

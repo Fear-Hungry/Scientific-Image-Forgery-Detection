@@ -85,15 +85,22 @@ class DinoV2SegmentationModel(nn.Module):
         return (int(patch[0]), int(patch[1]))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        tokens = self.encoder.forward_features(x)  # (B, 1 + HW, C)
+        tokens = self.encoder.forward_features(x)  # (B, 1 + (reg) + HW, C)
         if tokens.ndim != 3 or tokens.shape[1] < 2:
             raise RuntimeError(f"Unexpected encoder output shape: {tokens.shape}")
 
-        patch_tokens = tokens[:, 1:, :]
+        # DINOv2 "reg" variants add register tokens after cls (ex.: reg4 => 1 cls + 4 reg).
+        # timm exposes the number of prefix tokens via `num_prefix_tokens`.
+        prefix = int(getattr(self.encoder, "num_prefix_tokens", 1))
+        patch_tokens = tokens[:, prefix:, :]
         b, n, c = patch_tokens.shape
-        patch_h, patch_w = self.patch_size
-        grid_h = x.shape[2] // patch_h
-        grid_w = x.shape[3] // patch_w
+        grid_size = getattr(getattr(self.encoder, "patch_embed", None), "grid_size", None)
+        if grid_size is not None:
+            grid_h, grid_w = int(grid_size[0]), int(grid_size[1])
+        else:
+            patch_h, patch_w = self.patch_size
+            grid_h = x.shape[2] // patch_h
+            grid_w = x.shape[3] // patch_w
         if grid_h * grid_w != n:
             grid = int(math.sqrt(n))
             if grid * grid != n:

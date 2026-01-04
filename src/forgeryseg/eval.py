@@ -63,7 +63,9 @@ def validate_submission_format(
     if split == "test":
         sample_path = data_root / "sample_submission.csv"
         expected_ids = (
-            pd.read_csv(sample_path)["case_id"].astype(str).tolist() if sample_path.exists() else list(case_by_id.keys())
+            pd.read_csv(sample_path)["case_id"].astype(str).tolist()
+            if sample_path.exists()
+            else list(case_by_id.keys())
         )
     else:
         expected_ids = list(case_by_id.keys())

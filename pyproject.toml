@@ -33,7 +33,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest", "ruff"]
+dev = ["pre-commit", "pytest", "ruff"]
 
 [project.urls]
 Repository = "https://github.com/Fear-Hungry/Scientific-Image-Forgery-Detection"

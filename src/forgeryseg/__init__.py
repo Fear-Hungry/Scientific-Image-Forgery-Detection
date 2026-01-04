@@ -8,4 +8,3 @@ __all__ = [
     "masks_to_annotation",
     "of1_score",
 ]
-

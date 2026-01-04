@@ -27,4 +27,3 @@ class FFTClassifier(nn.Module):
         if out.ndim == 2 and out.shape[1] == 1:
             out = out[:, 0]
         return out
-

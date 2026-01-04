@@ -165,9 +165,7 @@ def train_fft_classifier(
         scheduler_obj = None
         step_per_batch = False
         if scheduler == "cosine":
-            scheduler_obj = torch.optim.lr_scheduler.CosineAnnealingLR(
-                opt, T_max=int(epochs), eta_min=float(lr_min)
-            )
+            scheduler_obj = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=int(epochs), eta_min=float(lr_min))
         elif scheduler == "onecycle":
             max_lr_eff = float(max_lr) if float(max_lr) > 0 else float(lr)
             scheduler_obj = torch.optim.lr_scheduler.OneCycleLR(

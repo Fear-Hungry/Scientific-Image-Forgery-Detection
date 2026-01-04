@@ -13,4 +13,3 @@ def test_load_flexible_state_dict_model_key(tmp_path) -> None:
     missing, unexpected = load_flexible_state_dict(model, ckpt)
     assert missing == []
     assert unexpected == []
-

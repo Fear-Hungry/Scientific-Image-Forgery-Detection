@@ -66,4 +66,3 @@ def make_transforms(input_size: int, *, train: bool, aug: AugMode) -> TransformF
         return out["image"], out["mask"]
 
     return _apply
-

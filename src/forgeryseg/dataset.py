@@ -16,7 +16,6 @@ class RecodaiSample(NamedTuple):
     image: torch.Tensor  # (3, H, W), float32 in [0, 1]
     mask: torch.Tensor  # (1, H, W), float32 in {0, 1}
     is_forged: bool
-    mask_path: Path | None
 
 
 def list_cases(
@@ -145,5 +144,4 @@ class RecodaiDataset(Dataset[RecodaiSample]):
             image=image_t,
             mask=mask_t,
             is_forged=is_forged,
-            mask_path=case.mask_path,
         )

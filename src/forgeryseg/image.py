@@ -63,4 +63,3 @@ def unletterbox(image: np.ndarray, meta: LetterboxMeta) -> np.ndarray:
         return cv2.resize(cropped, (meta.orig_w, meta.orig_h), interpolation=cv2.INTER_LINEAR)
 
     raise ValueError(f"Expected 2D or 3D array, got shape={image.shape}")
-

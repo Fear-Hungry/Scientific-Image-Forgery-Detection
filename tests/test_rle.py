@@ -35,4 +35,3 @@ def test_rle_authentic_is_empty() -> None:
     ann = masks_to_annotation([])
     assert ann == "authentic"
     assert annotation_to_masks(ann, (5, 6)) == []
-

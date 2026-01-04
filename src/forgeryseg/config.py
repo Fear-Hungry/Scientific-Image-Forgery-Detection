@@ -219,9 +219,7 @@ class PostprocessConfig:
             min_mean_conf=float(d.get("min_mean_conf", cls.min_mean_conf)),
             min_prob_std=float(d.get("min_prob_std", cls.min_prob_std)),
             small_area=None if d.get("small_area") is None else int(d.get("small_area")),
-            small_min_mean_conf=None
-            if d.get("small_min_mean_conf") is None
-            else float(d.get("small_min_mean_conf")),
+            small_min_mean_conf=None if d.get("small_min_mean_conf") is None else float(d.get("small_min_mean_conf")),
             authentic_area_max=None if d.get("authentic_area_max") is None else int(d.get("authentic_area_max")),
             authentic_conf_max=None if d.get("authentic_conf_max") is None else float(d.get("authentic_conf_max")),
         )

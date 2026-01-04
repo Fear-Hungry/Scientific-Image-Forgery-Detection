@@ -68,4 +68,3 @@ class JSONLoggerCallback(Callback):
         payload = {"epochs": self._items, "summary": summary}
         self.path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
         self._items = []
-

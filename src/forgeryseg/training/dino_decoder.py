@@ -81,4 +81,3 @@ def train_dino_decoder(
         path_roots=[config_path.parent, Path.cwd()],
     )
     return trainer.fit()
-

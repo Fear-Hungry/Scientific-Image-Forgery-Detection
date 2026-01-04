@@ -193,7 +193,9 @@ class Trainer:
         summary = result.as_dict()
         for cb in self.callbacks:
             cb.on_train_end(summary)
-        print(f"mean_best_val_of1={summary['mean_best_val_of1']:.6f} mean_best_val_loss={summary['mean_best_val_loss']:.6f}")
+        print(
+            f"mean_best_val_of1={summary['mean_best_val_of1']:.6f} mean_best_val_loss={summary['mean_best_val_loss']:.6f}"
+        )
         return result
 
     def config_train_transforms(self):
@@ -260,7 +262,9 @@ class Trainer:
                 eta_min=float(self.config.train.lr_min),
             )
         elif self.config.train.scheduler == "onecycle":
-            max_lr_eff = float(self.config.train.max_lr) if float(self.config.train.max_lr) > 0 else float(self.config.train.lr)
+            max_lr_eff = (
+                float(self.config.train.max_lr) if float(self.config.train.max_lr) > 0 else float(self.config.train.lr)
+            )
             scheduler_obj = torch.optim.lr_scheduler.OneCycleLR(
                 opt,
                 max_lr=max_lr_eff,

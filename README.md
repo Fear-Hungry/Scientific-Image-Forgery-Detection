@@ -23,12 +23,19 @@ python scripts/predict_submission.py --config configs/dino_v3_518_r69_fft_gate.j
 - Guia completo: `docs/KAGGLE.md`
 - Esquema de configuração (configs): `docs/CONFIG.md`
 
+## Dependências e reprodutibilidade
+
+- `requirements.txt`: pinado para **rodar local/CI** de forma determinística.
+- `requirements-kaggle.txt`: pinagem de libs “neutras” para Kaggle; **não fixa `torch/torchvision`** (use as versões do próprio Kaggle e ajuste só se necessário).
+- Para atualizar versões: edite `requirements.txt`/`requirements-kaggle.txt`, rode `make lint test` e valide o notebook `notebooks/fase_00_submissao_kaggle.ipynb`.
+
 ## Atualizações (2026-01-04)
 
 - Inferência mais modular: `InferenceEngine` + `SubmissionWriter` (inclui `batch_size` quando não usa tiling) e `FFTGate` opcional.
 - Avaliação local: `scripts/evaluate_submission.py` valida CSV/decodificação e calcula o score (oF1) em `train/supplemental`.
 - Ensemble melhorado: pesos automáticos por score (bugfix) e opção `--diagnostics` para depuração por `case_id`.
 - Documentação/atalhos: `docs/CONFIG.md`, `docs/KAGGLE.md`, `Makefile` e `requirements-kaggle.txt` (pinagem para reproduzir ambiente).
+- Qualidade: mais testes unitários (dataset, postprocess, FFT gate, Trainer checkpoint), CI e `pre-commit`.
 
 ## Sumário
 

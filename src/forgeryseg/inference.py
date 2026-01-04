@@ -149,10 +149,7 @@ def predict_prob_map_tiled(
     for i in range(0, len(tiles), batch_size):
         batch = tiles[i : i + batch_size]
         x = torch.stack(
-            [
-                torch.from_numpy(pad).permute(2, 0, 1).contiguous().float() / 255.0
-                for _, _, pad, _ in batch
-            ],
+            [torch.from_numpy(pad).permute(2, 0, 1).contiguous().float() / 255.0 for _, _, pad, _ in batch],
             dim=0,
         ).to(device)
         prob_batch = predict_with_tta(model, x, transforms=tta_transforms, weights=tta_weights)[:, 0]

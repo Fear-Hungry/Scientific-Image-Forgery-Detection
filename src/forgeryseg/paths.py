@@ -50,4 +50,3 @@ def resolve_existing_path(
                     continue
 
     return p
-

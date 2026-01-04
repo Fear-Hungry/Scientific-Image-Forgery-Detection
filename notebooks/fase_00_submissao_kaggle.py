@@ -52,6 +52,7 @@ except Exception as e:
 
 print(f"numpy={np.__version__} pandas={pd.__version__}")
 
+
 def _find_code_root() -> Path:
     cwd = Path.cwd()
     for p in [cwd, *cwd.parents]:

@@ -113,7 +113,11 @@ class InferenceEngine:
                 batch_size=int(cfg.inference.tiling.batch_size),
             )
 
-        fft_gate = FFTGate.from_config(cfg.inference.fft_gate, device=device, path_roots=path_roots) if cfg.inference.fft_gate else None
+        fft_gate = (
+            FFTGate.from_config(cfg.inference.fft_gate, device=device, path_roots=path_roots)
+            if cfg.inference.fft_gate
+            else None
+        )
 
         return cls(
             model=model,
@@ -207,7 +211,9 @@ class InferenceEngine:
     def predict_annotation_path(self, image_path: Pathish) -> tuple[str, bool]:
         return self.predict_annotation(load_rgb(image_path))
 
-    def predict_instances(self, image_rgb: np.ndarray, *, prob_map: np.ndarray | None = None) -> tuple[list[np.ndarray], bool]:
+    def predict_instances(
+        self, image_rgb: np.ndarray, *, prob_map: np.ndarray | None = None
+    ) -> tuple[list[np.ndarray], bool]:
         if prob_map is None:
             prob_map = self.predict(image_rgb)
         instances = postprocess_prob(prob_map, self.postprocess)

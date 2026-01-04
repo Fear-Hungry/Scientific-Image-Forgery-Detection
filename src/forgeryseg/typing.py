@@ -21,4 +21,3 @@ NpBoolMask = np.ndarray  # (H, W), dtype=bool or uint8
 TorchFloat = torch.Tensor
 MaskList = Sequence[NpBoolMask]
 Pathish = str | Path
-

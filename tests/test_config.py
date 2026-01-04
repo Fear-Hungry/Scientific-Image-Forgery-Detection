@@ -45,4 +45,3 @@ def test_config_overrides_work() -> None:
     assert cfg.model.input_size == 123
     assert cfg.inference.postprocess.min_area == 321
     assert cfg.train.epochs == 7
-

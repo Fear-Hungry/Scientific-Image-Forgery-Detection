@@ -29,4 +29,3 @@ def test_predict_prob_map_tiled_constant_matches_global() -> None:
     assert np.allclose(p_global, 0.5, atol=1e-6)
     assert np.allclose(p_tiled, 0.5, atol=1e-6)
     assert np.allclose(p_global, p_tiled, atol=1e-6)
-

@@ -51,4 +51,3 @@ def stratified_splits(
         return [(i, tr, va) for i, (tr, va) in enumerate(splitter.split(np.zeros(len(labels)), labels))]
     except Exception as e:
         raise RuntimeError(f"StratifiedKFold unavailable ({type(e).__name__}: {e})") from e
-

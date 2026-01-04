@@ -29,4 +29,3 @@ def test_list_ordered_cases_uses_sample_submission_order(tmp_path: Path) -> None
 
     ordered = list_ordered_cases(data_root, "test")
     assert [c.case_id for c in ordered] == ["2", "1", "10"]
-

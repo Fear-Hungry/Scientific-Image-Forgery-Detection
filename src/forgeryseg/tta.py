@@ -91,4 +91,3 @@ def predict_with_tta(
         prob = tta.invert(prob)
         prob_sum += prob.float() * float(w)
     return prob_sum
-

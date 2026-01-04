@@ -19,4 +19,3 @@ def dice_loss(logits: torch.Tensor, targets: torch.Tensor, *, eps: float = 1e-6)
 def bce_dice_loss(logits: torch.Tensor, targets: torch.Tensor, *, bce_weight: float = 1.0) -> torch.Tensor:
     bce = F.binary_cross_entropy_with_logits(logits, targets.float())
     return bce_weight * bce + dice_loss(logits, targets)
-

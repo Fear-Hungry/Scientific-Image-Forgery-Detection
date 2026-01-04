@@ -11,7 +11,7 @@ def _pixel_f1(pred: np.ndarray, gt: np.ndarray) -> float:
     tp = np.logical_and(pred, gt).sum()
     fp = np.logical_and(pred, ~gt).sum()
     fn = np.logical_and(~pred, gt).sum()
-    denom = (2 * tp + fp + fn)
+    denom = 2 * tp + fp + fn
     if denom == 0:
         return 0.0
     return float((2 * tp) / denom)
@@ -39,4 +39,3 @@ def of1_score(pred_masks: Sequence[np.ndarray], gt_masks: Sequence[np.ndarray]) 
     row_ind, col_ind = linear_sum_assignment(-f1)
     matched_sum = float(f1[row_ind, col_ind].sum())
     return matched_sum / float(max(n_pred, n_gt))
-

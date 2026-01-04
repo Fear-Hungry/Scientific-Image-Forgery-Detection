@@ -1,6 +1,7 @@
 # Recod.ai/LUC — Scientific Image Forgery Detection (Kaggle)
 
-Repositório com um *snapshot* dos dados da competição do Kaggle **“Recod.ai/LUC - Scientific Image Forgery Detection”** e um guia completo do problema, formato de submissão e métrica.
+Repositório com **pipeline + utilitários** para a competição do Kaggle **“Recod.ai/LUC - Scientific Image Forgery Detection”** (segmentação + RLE).  
+Os dados **não são versionados** aqui: o projeto espera o layout do Kaggle em `data/recodai` (veja “Como baixar os dados via Kaggle API”).
 
 - Página oficial: https://www.kaggle.com/competitions/recodai-luc-scientific-image-forgery-detection
 - Métrica oficial (código + RLE): https://www.kaggle.com/code/metric/recodai-f1
@@ -14,7 +15,6 @@ Repositório com um *snapshot* dos dados da competição do Kaggle **“Recod.ai
   - [Saída esperada](#saída-esperada)
   - [Por que é difícil](#por-que-é-difícil)
 - [Dados (estrutura e formatos)](#dados-estrutura-e-formatos)
-  - [Estatísticas do snapshot deste repo](#estatísticas-do-snapshot-deste-repo)
   - [Imagens](#imagens)
   - [Máscaras (ground truth)](#máscaras-ground-truth)
 - [Notebooks (Kaggle)](#notebooks-kaggle)
@@ -24,6 +24,7 @@ Repositório com um *snapshot* dos dados da competição do Kaggle **“Recod.ai
 - [Regras e restrições do Kaggle (code competition)](#regras-e-restrições-do-kaggle-code-competition)
 - [Como baixar os dados via Kaggle API](#como-baixar-os-dados-via-kaggle-api)
 - [Dicas práticas (baseline e armadilhas comuns)](#dicas-práticas-baseline-e-armadilhas-comuns)
+- [Pipeline (DINOv2 + CNN) — scripts deste repo](#pipeline-dinov2--cnn--scripts-deste-repo)
 
 ## Visão geral
 
@@ -72,11 +73,10 @@ Uma imagem (PNG) de contexto biomédico/científico.
 
 ## Dados (estrutura e formatos)
 
-Este repositório contém os dados em `data/`:
+O projeto espera os dados em `data/recodai`:
 
 ```
 data/
-  recodai-luc-scientific-image-forgery-detection.zip
   recodai/
     sample_submission.csv
     train_images/
@@ -88,24 +88,17 @@ data/
     test_images/   # amostra pública (em code competitions o teste real é oculto)
 ```
 
-### Estatísticas do snapshot deste repo
-
-- `train_images/authentic`: **2.377** imagens
-- `train_images/forged`: **2.751** imagens (**todas com máscara** em `train_masks/`)
-- `supplemental_images`: **48** imagens (com `supplemental_masks/`)
-- `test_images`: **1** imagem (exemplo; o conjunto de teste real é oculto no ambiente do Kaggle)
-
 ### Imagens
 
 - Formato: `*.png`
-- Dimensões: variam bastante (no snapshot: de **64×74** até **3888×3888** no treino; *supplemental* pode ter dimensões ainda maiores).
+- Dimensões: variam bastante (há imagens pequenas e outras com milhares de pixels por lado).
 
 ### Máscaras (ground truth)
 
 - Formato: `*.npy` (NumPy)
 - Tipo: `uint8` (valores **0/1**)
 - **Shape:** `(N, H, W)`
-  - `N` = número de **instâncias** de regiões copiadas naquela imagem (no snapshot existem exemplos com `N=1,2,3,...`).
+  - `N` = número de **instâncias** de regiões copiadas naquela imagem.
   - `H, W` batem com a imagem correspondente em `train_images/forged/<case_id>.png`.
 
 > Observação: as máscaras são fornecidas para **todas** as imagens em `train_images/forged/`. Para imagens em `train_images/authentic/`, o rótulo é “sem forjamento” (submissão deve ser `authentic`).
@@ -115,17 +108,14 @@ data/
 Notebooks prontos para uso no Kaggle. A ideia é manter **a lógica em `src/` + `scripts/`** e deixar o notebook apenas como “orquestrador”.
 
 - `notebooks/fase_00_submissao_kaggle.ipynb`: **submissão** (inferência + geração do `submission.csv`, pensado para internet OFF).
-- `notebooks/fase_01_pre_treinamento_kaggle.ipynb`: **pré-treinamento** (internet ON) + empacota checkpoints para reutilizar offline.
-- (Opcional) `notebooks/fase_00_pipeline_unico_kaggle.ipynb`: pipeline “tudo-em-um” (setup → treino opcional → submissão).
+- `notebooks/fase_00_submissao_kaggle.py`: a mesma lógica (fonte), para versionar e revisar diffs.
 
 Fluxo típico (Kaggle):
 
 1) Anexe o dataset da competição (`recodai-luc-scientific-image-forgery-detection`).
-2) Rode `notebooks/fase_01_pre_treinamento_kaggle.ipynb` com **internet ON** (gera `outputs_pretrain.zip`).
-3) Crie/anexe um Kaggle Dataset com a pasta `outputs/` (incluindo `models_seg/` e opcionalmente `models_cls/`).
-4) Rode `notebooks/fase_00_submissao_kaggle.ipynb` com **internet OFF** para gerar `/kaggle/working/submission.csv`.
-
-> Dica (Kaggle CLI): `notebooks/kernel-metadata.json` controla qual notebook é enviado em `code_file`. Para subir kernels diferentes, troque esse campo antes de dar `kaggle kernels push`.
+2) Anexe um Kaggle Dataset com este repo (pelo menos `src/` e `configs/`), ou copie o código para o notebook.
+3) (Opcional, mas necessário para inferência com pesos) Anexe um Kaggle Dataset com seus checkpoints em `outputs/models/*.pth` (mesmos paths usados em `configs/*.json`).
+4) Rode `notebooks/fase_00_submissao_kaggle.ipynb` para gerar `/kaggle/working/submission.csv`.
 
 ## Formato de submissão
 
@@ -242,7 +232,6 @@ unzip -q data/recodai-luc-scientific-image-forgery-detection.zip -d data/recodai
 
 ## Dicas práticas (baseline e armadilhas comuns)
 
-- **Baseline público (Kaggle):** *Public Score* **0.303** (submission “Scientific Image Forgery Detection - Version 3”, 28/dez/2025), gerada do notebook `notebooks/fase_00_pipeline_unico_kaggle.ipynb`. Snapshot congelado em `notebooks/baseline_public_0_303.ipynb`.
 - **Instâncias importam:** as máscaras são `(N, H, W)`. Se seu modelo produzir uma única máscara (segmentação sem instâncias), considere separar em instâncias via componentes conexos (*connected components*) antes de codificar em RLE.
 - **RLE “na marra” dá ruim:** use as funções oficiais do notebook `metric/recodai-f1` para evitar erro de ordem (*F-order*) e validações (starts em ordem crescente, etc.).
 - **Aspas no CSV:** `annotation` com RLE costuma precisar de aspas no CSV.
@@ -258,7 +247,13 @@ Este README é um guia derivado da proposta e do formato oficial da competição
 
 ## Pipeline (DINOv2 + CNN) — scripts deste repo
 
-Configurações prontas (3 versões) em `configs/` e CLIs em `scripts/`:
+O estado atual do repo é um pipeline **simples e reproduzível**:
+
+- **Inferência (submissão):** `scripts/predict_submission.py` (ou `notebooks/fase_00_submissao_kaggle.ipynb` no Kaggle).
+- **Pós-processamento:** `src/forgeryseg/postprocess.py` (threshold + filtros + regras de `authentic`).
+- **Complementos opcionais:** `fft_gate` e `dinov2_freq_fusion` (seções abaixo).
+
+Configurações prontas em `configs/` e CLIs em `scripts/`:
 
 - Gerar submissão individual:
   - `python scripts/predict_submission.py --config configs/dino_v1_718_u52.json --data-root data/recodai --split test --out outputs/submission1.csv`
@@ -268,8 +263,10 @@ Configurações prontas (3 versões) em `configs/` e CLIs em `scripts/`:
   - `python scripts/ensemble_submissions.py --data-root data/recodai --split test --subs outputs/submission1.csv outputs/submission2.csv outputs/submission3.csv --scores 0.324 0.323 0.322 --method weighted --out outputs/submission.csv`
 - Sanidade (oracle + baseline all-authentic no treino):
   - `python scripts/sanity_submissions.py --data-root data/recodai --out-dir outputs/sanity --split train`
+- Treinar modelo de segmentação (salva checkpoint em `--out`):
+  - `python scripts/train_dino_decoder.py --config configs/dino_v3_518_r69.json --data-root data/recodai --out outputs/models/r69.pth --epochs 5`
 
-Os caminhos de checkpoints em `configs/*.json` são placeholders (ex.: `outputs/models/u52.pth`) e devem existir no ambiente de execução.
+Os caminhos de checkpoints em `configs/*.json` (ex.: `outputs/models/r69.pth`) **devem existir** no ambiente de execução (ex.: anexando um Kaggle Dataset com `outputs/models/`).
 
 ### FFT como sinal complementar (opcional)
 
@@ -277,6 +274,8 @@ Este repo também inclui um *gate* opcional baseado em FFT para reforçar decis�
 
 - Treinar um classificador FFT (log-magnitude):
   - `python scripts/train_fft_classifier.py --config configs/fft_classifier_logmag_256.json --data-root data/recodai --out outputs/models/fft_cls.pth`
+- (Opcional) Treinar um classificador FFT (phase-only):
+  - `python scripts/train_fft_classifier.py --config configs/fft_classifier_phase_only_256.json --data-root data/recodai --out outputs/models/fft_cls_phase.pth`
 - Rodar submissão com `fft_gate` habilitado (exemplo):
   - `python scripts/predict_submission.py --config configs/dino_v3_518_r69_fft_gate.json --data-root data/recodai --split test --out outputs/submission_fft_gate.csv`
 

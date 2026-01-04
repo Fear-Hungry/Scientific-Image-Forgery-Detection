@@ -40,7 +40,6 @@ python scripts/predict_submission.py --config configs/dino_v3_518_r69_fft_gate.j
 - [Como baixar os dados via Kaggle API](#como-baixar-os-dados-via-kaggle-api)
 - [Dicas práticas (baseline e armadilhas comuns)](#dicas-práticas-baseline-e-armadilhas-comuns)
 - [Pipeline (DINOv2 + CNN) — scripts deste repo](#pipeline-dinov2--cnn--scripts-deste-repo)
-- [Licença](#licença)
 
 ## Visão geral
 
@@ -303,8 +302,3 @@ Além do *gate* (classificador), existe um modelo `dinov2_freq_fusion` que extra
 - `python scripts/predict_submission.py --config configs/dino_v3_518_r69_freq_fusion.json --data-root data/recodai --split test --out outputs/submission_freq_fusion.csv`
 
 Modos suportados em `freq_fusion.mode`: `logmag`, `hp_residual`, `phase_only`, `lp_hp`.
-
-## Licença
-
-- Código: MIT (veja `LICENSE`).
-- Dados: devem ser obtidos via Kaggle e seguem os termos/regras da competição (não são redistribuídos neste repositório).

@@ -6,6 +6,7 @@ scikit-learn
 tqdm
 albumentations
 opencv-python
+pyyaml
 torch
 torchvision
 timm

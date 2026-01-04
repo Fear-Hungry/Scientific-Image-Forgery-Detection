@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import argparse
-import json
 from pathlib import Path
 
 import _bootstrap  # noqa: F401
@@ -18,11 +17,16 @@ def main() -> None:
     ap.add_argument("--out", type=Path, required=True)
     ap.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
     ap.add_argument("--limit", type=int, default=0)
+    ap.add_argument(
+        "--set",
+        dest="overrides",
+        action="append",
+        default=[],
+        help="Override config keys (ex.: --set inference.postprocess.min_area=150)",
+    )
     args = ap.parse_args()
 
     device = torch.device(args.device)
-    cfg = json.loads(args.config.read_text())
-    _ = cfg  # keep early JSON parse errors in this script for fast feedback
     write_submission_csv(
         config_path=args.config,
         data_root=args.data_root,
@@ -30,6 +34,7 @@ def main() -> None:
         out_path=args.out,
         device=device,
         limit=int(args.limit),
+        overrides=list(args.overrides) if args.overrides else None,
         path_roots=[args.config.parent, Path.cwd(), Path(__file__).resolve().parents[1]],
     )
 

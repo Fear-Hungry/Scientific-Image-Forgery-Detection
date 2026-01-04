@@ -15,20 +15,27 @@ def main() -> None:
     ap.add_argument("--data-root", type=Path, required=True)
     ap.add_argument("--out", type=Path, required=True)
     ap.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
-    ap.add_argument("--epochs", type=int, default=5)
-    ap.add_argument("--batch-size", type=int, default=4)
-    ap.add_argument("--lr", type=float, default=1e-3)
-    ap.add_argument("--weight-decay", type=float, default=1e-4)
-    ap.add_argument("--num-workers", type=int, default=2)
-    ap.add_argument("--val-fraction", type=float, default=0.1)
-    ap.add_argument("--seed", type=int, default=42)
-    ap.add_argument("--folds", type=int, default=1)
-    ap.add_argument("--fold", type=int, default=-1)
-    ap.add_argument("--aug", choices=["none", "basic", "robust"], default="basic")
-    ap.add_argument("--scheduler", choices=["none", "cosine", "onecycle"], default="none")
-    ap.add_argument("--lr-min", type=float, default=1e-6)
-    ap.add_argument("--max-lr", type=float, default=0.0)
-    ap.add_argument("--pct-start", type=float, default=0.1)
+    ap.add_argument("--epochs", type=int, default=None)
+    ap.add_argument("--batch-size", type=int, default=None)
+    ap.add_argument("--lr", type=float, default=None)
+    ap.add_argument("--weight-decay", type=float, default=None)
+    ap.add_argument("--num-workers", type=int, default=None)
+    ap.add_argument("--val-fraction", type=float, default=None)
+    ap.add_argument("--seed", type=int, default=None)
+    ap.add_argument("--folds", type=int, default=None)
+    ap.add_argument("--fold", type=int, default=None)
+    ap.add_argument("--aug", choices=["none", "basic", "robust"], default=None)
+    ap.add_argument("--scheduler", choices=["none", "cosine", "onecycle"], default=None)
+    ap.add_argument("--lr-min", type=float, default=None)
+    ap.add_argument("--max-lr", type=float, default=None)
+    ap.add_argument("--pct-start", type=float, default=None)
+    ap.add_argument(
+        "--set",
+        dest="overrides",
+        action="append",
+        default=[],
+        help="Override config keys (ex.: --set train.epochs=10)",
+    )
     args = ap.parse_args()
 
     train_dino_decoder(
@@ -36,23 +43,23 @@ def main() -> None:
         data_root=args.data_root,
         out_path=args.out,
         device=args.device,
-        epochs=int(args.epochs),
-        batch_size=int(args.batch_size),
-        lr=float(args.lr),
-        weight_decay=float(args.weight_decay),
-        num_workers=int(args.num_workers),
-        val_fraction=float(args.val_fraction),
-        seed=int(args.seed),
-        folds=int(args.folds),
-        fold=int(args.fold),
+        overrides=list(args.overrides) if args.overrides else None,
+        epochs=args.epochs,
+        batch_size=args.batch_size,
+        lr=args.lr,
+        weight_decay=args.weight_decay,
+        num_workers=args.num_workers,
+        val_fraction=args.val_fraction,
+        seed=args.seed,
+        folds=args.folds,
+        fold=args.fold,
         aug=args.aug,  # type: ignore[arg-type]
         scheduler=args.scheduler,  # type: ignore[arg-type]
-        lr_min=float(args.lr_min),
-        max_lr=float(args.max_lr),
-        pct_start=float(args.pct_start),
+        lr_min=args.lr_min,
+        max_lr=args.max_lr,
+        pct_start=args.pct_start,
     )
 
 
 if __name__ == "__main__":
     main()
-

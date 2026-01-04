@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import json
+import dataclasses
 from pathlib import Path
 from typing import Callable, Literal
 
@@ -9,10 +9,12 @@ import torch
 from torch.utils.data import DataLoader, Subset
 from tqdm import tqdm
 
+from ..config import SegmentationModelConfig, load_segmentation_config
 from ..dataset import RecodaiDataset
 from ..losses import bce_dice_loss
 from ..models.dinov2_decoder import DinoV2EncoderSpec, DinoV2SegmentationModel
 from ..models.dinov2_freq_fusion import DinoV2FreqFusionSegmentationModel, FreqFusionSpec
+from ..paths import resolve_existing_path
 from ..typing import Pathish
 from .utils import fold_out_path, seed_everything, stratified_splits
 
@@ -20,6 +22,7 @@ AugMode = Literal["none", "basic", "robust"]
 SchedulerMode = Literal["none", "cosine", "onecycle"]
 
 TransformFn = Callable[[np.ndarray, np.ndarray], tuple[np.ndarray, np.ndarray]]
+
 
 def make_transforms(input_size: int, *, train: bool, aug: AugMode) -> TransformFn:
     import albumentations as A
@@ -87,21 +90,21 @@ def eval_loss(model: torch.nn.Module, loader: DataLoader, device: torch.device) 
     return float(np.mean(losses)) if losses else 0.0
 
 
-def build_model(cfg: dict, encoder: DinoV2EncoderSpec, *, freeze_encoder: bool) -> torch.nn.Module:
-    model_type = str(cfg.get("model_type", "dinov2"))
+def build_model(cfg: SegmentationModelConfig, encoder: DinoV2EncoderSpec, *, freeze_encoder: bool) -> torch.nn.Module:
+    model_type = str(cfg.type)
     if model_type == "dinov2_freq_fusion":
-        freq = FreqFusionSpec(**cfg.get("freq_fusion", {}))
+        freq = FreqFusionSpec(**cfg.freq_fusion)
         return DinoV2FreqFusionSegmentationModel(
             encoder,
-            decoder_hidden_channels=int(cfg.get("decoder_hidden_channels", 256)),
-            decoder_dropout=float(cfg.get("decoder_dropout", 0.0)),
+            decoder_hidden_channels=int(cfg.decoder_hidden_channels),
+            decoder_dropout=float(cfg.decoder_dropout),
             freeze_encoder=freeze_encoder,
             freq=freq,
         )
     return DinoV2SegmentationModel(
         encoder,
-        decoder_hidden_channels=int(cfg.get("decoder_hidden_channels", 256)),
-        decoder_dropout=float(cfg.get("decoder_dropout", 0.0)),
+        decoder_hidden_channels=int(cfg.decoder_hidden_channels),
+        decoder_dropout=float(cfg.decoder_dropout),
         freeze_encoder=freeze_encoder,
     )
 
@@ -112,36 +115,56 @@ def train_dino_decoder(
     data_root: Pathish,
     out_path: Pathish,
     device: str | torch.device,
-    epochs: int = 5,
-    batch_size: int = 4,
-    lr: float = 1e-3,
-    weight_decay: float = 1e-4,
-    num_workers: int = 2,
-    val_fraction: float = 0.1,
-    seed: int = 42,
-    folds: int = 1,
-    fold: int = -1,
-    aug: AugMode = "basic",
-    scheduler: SchedulerMode = "none",
-    lr_min: float = 1e-6,
-    max_lr: float = 0.0,
-    pct_start: float = 0.1,
+    overrides: list[str] | None = None,
+    epochs: int | None = None,
+    batch_size: int | None = None,
+    lr: float | None = None,
+    weight_decay: float | None = None,
+    num_workers: int | None = None,
+    val_fraction: float | None = None,
+    seed: int | None = None,
+    folds: int | None = None,
+    fold: int | None = None,
+    aug: AugMode | None = None,
+    scheduler: SchedulerMode | None = None,
+    lr_min: float | None = None,
+    max_lr: float | None = None,
+    pct_start: float | None = None,
 ) -> list[Path]:
     config_path = Path(config_path)
     out_path = Path(out_path)
     device = torch.device(device)
 
-    cfg = json.loads(config_path.read_text())
-    input_size = int(cfg["input_size"])
+    cfg = load_segmentation_config(config_path, overrides=overrides)
+    input_size = int(cfg.model.input_size)
 
-    enc_cfg = cfg.get("encoder", {})
+    train_cfg = cfg.train
+    epochs = int(train_cfg.epochs) if epochs is None else int(epochs)
+    batch_size = int(train_cfg.batch_size) if batch_size is None else int(batch_size)
+    lr = float(train_cfg.lr) if lr is None else float(lr)
+    weight_decay = float(train_cfg.weight_decay) if weight_decay is None else float(weight_decay)
+    num_workers = int(train_cfg.num_workers) if num_workers is None else int(num_workers)
+    val_fraction = float(train_cfg.val_fraction) if val_fraction is None else float(val_fraction)
+    seed = int(train_cfg.seed) if seed is None else int(seed)
+    folds = int(train_cfg.folds) if folds is None else int(folds)
+    fold = int(train_cfg.fold) if fold is None else int(fold)
+    aug = train_cfg.aug if aug is None else aug
+    scheduler = train_cfg.scheduler if scheduler is None else scheduler
+    lr_min = float(train_cfg.lr_min) if lr_min is None else float(lr_min)
+    max_lr = float(train_cfg.max_lr) if max_lr is None else float(max_lr)
+    pct_start = float(train_cfg.pct_start) if pct_start is None else float(pct_start)
+
+    enc_cfg = cfg.model.encoder
+    enc_ckpt = enc_cfg.checkpoint_path
+    if enc_ckpt:
+        enc_ckpt = str(resolve_existing_path(enc_ckpt, roots=[config_path.parent, Path.cwd()], search_kaggle_input=True))
     encoder = DinoV2EncoderSpec(
-        model_name=enc_cfg.get("model_name", "vit_base_patch14_dinov2"),
-        checkpoint_path=enc_cfg.get("checkpoint_path"),
-        pretrained=bool(enc_cfg.get("pretrained", False)),
+        model_name=enc_cfg.model_name,
+        checkpoint_path=enc_ckpt,
+        pretrained=enc_cfg.pretrained,
     )
 
-    freeze_encoder = bool(cfg.get("freeze_encoder", True))
+    freeze_encoder = bool(cfg.model.freeze_encoder)
     if freeze_encoder and encoder.checkpoint_path is None and not encoder.pretrained:
         raise ValueError(
             "freeze_encoder=true mas encoder não está pré-treinado. "
@@ -191,7 +214,7 @@ def train_dino_decoder(
             pin_memory=False,
         )
 
-        model = build_model(cfg, encoder, freeze_encoder=freeze_encoder).to(device)
+        model = build_model(cfg.model, encoder, freeze_encoder=freeze_encoder).to(device)
         opt = torch.optim.AdamW(model.parameters(), lr=float(lr), weight_decay=float(weight_decay))
 
         scheduler_obj = None
@@ -240,7 +263,14 @@ def train_dino_decoder(
                 best_val = val_loss
                 best_path.parent.mkdir(parents=True, exist_ok=True)
                 torch.save(
-                    {"model": model.state_dict(), "config": cfg, "fold": fold_id, "epoch": epoch, "val_loss": val_loss},
+                    {
+                        "model": model.state_dict(),
+                        "config": dataclasses.asdict(cfg),
+                        "config_path": str(config_path),
+                        "fold": fold_id,
+                        "epoch": epoch,
+                        "val_loss": val_loss,
+                    },
                     best_path,
                 )
                 print(f"saved best checkpoint to {best_path}")

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import json
+import dataclasses
 import random
 from pathlib import Path
 from typing import Literal
@@ -10,6 +10,7 @@ import torch
 from torch.utils.data import DataLoader, Subset
 from tqdm import tqdm
 
+from ..config import load_fft_classifier_config
 from ..dataset_fft import RecodaiFFTDataset
 from ..frequency import FFTParams
 from ..models.fft_classifier import FFTClassifier
@@ -54,24 +55,43 @@ def train_fft_classifier(
     data_root: Pathish,
     out_path: Pathish,
     device: str | torch.device,
-    epochs: int = 5,
-    batch_size: int = 32,
-    lr: float = 1e-3,
-    weight_decay: float = 1e-4,
-    num_workers: int = 2,
-    val_fraction: float = 0.1,
-    seed: int = 42,
-    folds: int = 1,
-    fold: int = -1,
-    no_aug: bool = False,
-    scheduler: SchedulerMode = "none",
-    lr_min: float = 1e-6,
-    max_lr: float = 0.0,
-    pct_start: float = 0.1,
+    overrides: list[str] | None = None,
+    epochs: int | None = None,
+    batch_size: int | None = None,
+    lr: float | None = None,
+    weight_decay: float | None = None,
+    num_workers: int | None = None,
+    val_fraction: float | None = None,
+    seed: int | None = None,
+    folds: int | None = None,
+    fold: int | None = None,
+    no_aug: bool | None = None,
+    scheduler: SchedulerMode | None = None,
+    lr_min: float | None = None,
+    max_lr: float | None = None,
+    pct_start: float | None = None,
 ) -> list[Path]:
     config_path = Path(config_path)
     out_path = Path(out_path)
     device = torch.device(device)
+
+    cfg = load_fft_classifier_config(config_path, overrides=overrides)
+    train_cfg = cfg.train
+
+    epochs = int(train_cfg.epochs) if epochs is None else int(epochs)
+    batch_size = int(train_cfg.batch_size) if batch_size is None else int(batch_size)
+    lr = float(train_cfg.lr) if lr is None else float(lr)
+    weight_decay = float(train_cfg.weight_decay) if weight_decay is None else float(weight_decay)
+    num_workers = int(train_cfg.num_workers) if num_workers is None else int(num_workers)
+    val_fraction = float(train_cfg.val_fraction) if val_fraction is None else float(val_fraction)
+    seed = int(train_cfg.seed) if seed is None else int(seed)
+    folds = int(train_cfg.folds) if folds is None else int(folds)
+    fold = int(train_cfg.fold) if fold is None else int(fold)
+    no_aug = bool(train_cfg.no_aug) if no_aug is None else bool(no_aug)
+    scheduler = train_cfg.scheduler if scheduler is None else scheduler
+    lr_min = float(train_cfg.lr_min) if lr_min is None else float(lr_min)
+    max_lr = float(train_cfg.max_lr) if max_lr is None else float(max_lr)
+    pct_start = float(train_cfg.pct_start) if pct_start is None else float(pct_start)
 
     folds = int(folds)
     if folds < 1:
@@ -80,12 +100,18 @@ def train_fft_classifier(
     if folds == 1 and not (0.0 < float(val_fraction) < 1.0):
         raise ValueError("val_fraction must be between 0 and 1 (quando folds=1)")
 
-    cfg = json.loads(config_path.read_text())
-    fft_params = FFTParams(**cfg.get("fft", {}))
+    fft_percentiles = tuple(float(x) for x in cfg.fft.normalize_percentiles)
+    if len(fft_percentiles) != 2:
+        raise ValueError("fft.normalize_percentiles must have 2 values")
+    fft_params = FFTParams(
+        mode=cfg.fft.mode,  # type: ignore[arg-type]
+        input_size=int(cfg.fft.input_size),
+        hp_radius_fraction=float(cfg.fft.hp_radius_fraction),
+        normalize_percentiles=fft_percentiles,  # type: ignore[arg-type]
+    )
 
-    model_cfg = cfg.get("model", {})
-    backbone = model_cfg.get("backbone", "resnet18")
-    dropout = float(model_cfg.get("dropout", 0.0))
+    backbone = cfg.model.backbone
+    dropout = float(cfg.model.dropout)
 
     seed_everything(int(seed))
     ds_train = RecodaiFFTDataset(
@@ -182,7 +208,14 @@ def train_fft_classifier(
                 best_val = val_loss
                 best_path.parent.mkdir(parents=True, exist_ok=True)
                 torch.save(
-                    {"model": model.state_dict(), "config": cfg, "fold": fold_id, "epoch": epoch, "val_loss": val_loss},
+                    {
+                        "model": model.state_dict(),
+                        "config": dataclasses.asdict(cfg),
+                        "config_path": str(config_path),
+                        "fold": fold_id,
+                        "epoch": epoch,
+                        "val_loss": val_loss,
+                    },
                     best_path,
                 )
                 print(f"saved best checkpoint to {best_path}")
@@ -190,4 +223,3 @@ def train_fft_classifier(
         saved.append(best_path)
 
     return saved
-

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import dataclasses
-import json
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -10,6 +9,7 @@ import torch
 from tqdm import tqdm
 
 from .checkpoint import load_flexible_state_dict
+from .config import FFTGateConfig, SegmentationModelConfig, load_segmentation_config
 from .dataset import list_cases
 from .frequency import FFTParams, fft_tensor
 from .inference import TilingParams, default_tta, load_rgb, predict_prob_map, predict_prob_map_tiled
@@ -67,35 +67,38 @@ def list_ordered_cases(data_root: Path, split: Split) -> list:
 
 
 def _load_segmentation_model(
-    cfg: dict,
+    cfg: SegmentationModelConfig,
     *,
     device: torch.device,
     path_roots: list[Path] | None = None,
 ) -> torch.nn.Module:
-    ckpt = cfg.get("checkpoint")
-    enc_cfg = cfg.get("encoder", {})
+    ckpt = cfg.checkpoint
+    enc_cfg = cfg.encoder
+    enc_ckpt = enc_cfg.checkpoint_path
+    if enc_ckpt:
+        enc_ckpt = str(resolve_existing_path(str(enc_ckpt), roots=path_roots, search_kaggle_input=True))
     encoder = DinoV2EncoderSpec(
-        model_name=enc_cfg.get("model_name", "vit_base_patch14_dinov2"),
-        checkpoint_path=enc_cfg.get("checkpoint_path"),
-        pretrained=bool(enc_cfg.get("pretrained", False)) and not bool(ckpt),
+        model_name=str(enc_cfg.model_name),
+        checkpoint_path=enc_ckpt,
+        pretrained=bool(enc_cfg.pretrained) and not bool(ckpt),
     )
 
-    model_type = str(cfg.get("model_type", "dinov2"))
+    model_type = str(cfg.type)
     if model_type == "dinov2_freq_fusion":
-        freq = FreqFusionSpec(**cfg.get("freq_fusion", {}))
+        freq = FreqFusionSpec(**cfg.freq_fusion)
         model = DinoV2FreqFusionSegmentationModel(
             encoder,
-            decoder_hidden_channels=int(cfg.get("decoder_hidden_channels", 256)),
-            decoder_dropout=float(cfg.get("decoder_dropout", 0.0)),
-            freeze_encoder=bool(cfg.get("freeze_encoder", True)),
+            decoder_hidden_channels=int(cfg.decoder_hidden_channels),
+            decoder_dropout=float(cfg.decoder_dropout),
+            freeze_encoder=bool(cfg.freeze_encoder),
             freq=freq,
         )
     else:
         model = DinoV2SegmentationModel(
             encoder,
-            decoder_hidden_channels=int(cfg.get("decoder_hidden_channels", 256)),
-            decoder_dropout=float(cfg.get("decoder_dropout", 0.0)),
-            freeze_encoder=bool(cfg.get("freeze_encoder", True)),
+            decoder_hidden_channels=int(cfg.decoder_hidden_channels),
+            decoder_dropout=float(cfg.decoder_dropout),
+            freeze_encoder=bool(cfg.freeze_encoder),
         )
 
     if ckpt:
@@ -109,45 +112,51 @@ def _load_segmentation_model(
 
 
 def _load_fft_gate(
-    cfg: dict,
+    fft_gate: FFTGateConfig | None,
     *,
     device: torch.device,
     path_roots: list[Path] | None = None,
 ) -> tuple[FFTClassifier, FFTParams, float] | None:
-    fft_gate = cfg.get("fft_gate")
-    if not isinstance(fft_gate, dict) or not fft_gate.get("enabled", True):
+    if fft_gate is None or not bool(fft_gate.enabled):
         return None
 
-    fft_ckpt = fft_gate.get("checkpoint")
+    fft_ckpt = fft_gate.checkpoint
     if not fft_ckpt:
         raise ValueError("fft_gate.enabled is true but fft_gate.checkpoint is missing")
     fft_ckpt_path = resolve_existing_path(str(fft_ckpt), roots=path_roots, search_kaggle_input=True)
     if not fft_ckpt_path.exists():
         raise FileNotFoundError(f"FFT checkpoint não encontrado: {fft_ckpt} (tentado: {fft_ckpt_path})")
 
-    fft_params = FFTParams(**fft_gate.get("fft", {}))
-    fft_threshold = float(fft_gate.get("threshold", 0.5))
+    fft_percentiles = tuple(float(x) for x in fft_gate.fft.normalize_percentiles)
+    if len(fft_percentiles) != 2:
+        raise ValueError("fft_gate.fft.normalize_percentiles must have 2 values")
+    fft_params = FFTParams(
+        mode=fft_gate.fft.mode,  # type: ignore[arg-type]
+        input_size=int(fft_gate.fft.input_size),
+        hp_radius_fraction=float(fft_gate.fft.hp_radius_fraction),
+        normalize_percentiles=fft_percentiles,  # type: ignore[arg-type]
+    )
+    fft_threshold = float(fft_gate.threshold)
     fft_model = FFTClassifier(
-        backbone=fft_gate.get("backbone", "resnet18"),
+        backbone=str(fft_gate.backbone),
         in_chans=1,
-        dropout=float(fft_gate.get("dropout", 0.0)),
+        dropout=float(fft_gate.dropout),
     )
     missing, unexpected = load_flexible_state_dict(fft_model, fft_ckpt_path)
     _warn_state_dict(missing, unexpected)
     return fft_model.to(device).eval(), fft_params, fft_threshold
 
 
-def _load_tiling(cfg: dict) -> TilingParams | None:
-    tiling_cfg = cfg.get("tiling", {})
-    if not isinstance(tiling_cfg, dict):
+def _load_tiling(cfg: object) -> TilingParams | None:
+    if not isinstance(cfg, dict):
         return None
-    tile_size = int(tiling_cfg.get("tile_size", 0))
+    tile_size = int(cfg.get("tile_size", 0))
     if tile_size <= 0:
         return None
     return TilingParams(
         tile_size=tile_size,
-        overlap=int(tiling_cfg.get("overlap", 0)),
-        batch_size=int(tiling_cfg.get("batch_size", 4)),
+        overlap=int(cfg.get("overlap", 0)),
+        batch_size=int(cfg.get("batch_size", 4)),
     )
 
 
@@ -159,29 +168,29 @@ def write_submission_csv(
     out_path: Pathish,
     device: torch.device,
     limit: int = 0,
+    overrides: list[str] | None = None,
     path_roots: list[Path] | None = None,
 ) -> SubmissionStats:
     config_path = Path(config_path)
     data_root = Path(data_root)
     out_path = Path(out_path)
 
-    cfg = json.loads(config_path.read_text())
-    input_size = int(cfg["input_size"])
-    post = PostprocessParams(**cfg.get("postprocess", {}))
+    cfg = load_segmentation_config(config_path, overrides=overrides)
+    input_size = int(cfg.model.input_size)
+    post = PostprocessParams(**dataclasses.asdict(cfg.inference.postprocess))
 
-    tta_cfg = cfg.get("tta", {})
     tta_transforms, tta_weights = default_tta(
-        zoom_scale=float(tta_cfg.get("zoom_scale", 0.9)),
-        weights=tuple(tta_cfg.get("weights", [0.5, 0.25, 0.25])),
+        zoom_scale=float(cfg.inference.tta.zoom_scale),
+        weights=tuple(cfg.inference.tta.weights),
     )
-    tiling = _load_tiling(cfg)
+    tiling = _load_tiling(dataclasses.asdict(cfg.inference.tiling) if cfg.inference.tiling is not None else None)
 
     # ensure config-relative paths work out of the box
     if path_roots is None:
         path_roots = [config_path.parent, Path.cwd()]
 
-    model = _load_segmentation_model(cfg, device=device, path_roots=path_roots)
-    fft_gate = _load_fft_gate(cfg, device=device, path_roots=path_roots)
+    model = _load_segmentation_model(cfg.model, device=device, path_roots=path_roots)
+    fft_gate = _load_fft_gate(cfg.inference.fft_gate, device=device, path_roots=path_roots)
 
     ordered = list_ordered_cases(data_root, split)
     if limit and limit > 0:

@@ -39,6 +39,11 @@ Saída final:
 
 - `/kaggle/working/submission.csv`
 
+Configs:
+
+- Estrutura e campos documentados em `docs/CONFIG.md`
+- No CLI, você pode sobrescrever parâmetros sem editar o arquivo via `--set chave=valor` (ex.: `--set inference.postprocess.min_area=200`)
+
 ## 3) Treino no Kaggle (opcional)
 
 Se você quiser treinar dentro do Kaggle (internet ON), rode os scripts a partir do notebook:

@@ -89,23 +89,61 @@ class DinoV2SegmentationModel(nn.Module):
         if tokens.ndim != 3 or tokens.shape[1] < 2:
             raise RuntimeError(f"Unexpected encoder output shape: {tokens.shape}")
 
-        # DINOv2 "reg" variants add register tokens after cls (ex.: reg4 => 1 cls + 4 reg).
-        # timm exposes the number of prefix tokens via `num_prefix_tokens`.
-        prefix = int(getattr(self.encoder, "num_prefix_tokens", 1))
-        patch_tokens = tokens[:, prefix:, :]
-        b, n, c = patch_tokens.shape
+        # Robust token parsing across timm versions:
+        # - some DINOv2 variants add register tokens after cls (ex.: reg4 => 1 cls + 4 reg)
+        # - older timm versions may not expose `num_prefix_tokens` / `patch_embed.grid_size`
+        patch_h, patch_w = self.patch_size
+        token_count = int(tokens.shape[1])
+
+        cands: list[tuple[int, int, int]] = []  # (n_patches, grid_h, grid_w)
         grid_size = getattr(getattr(self.encoder, "patch_embed", None), "grid_size", None)
         if grid_size is not None:
-            grid_h, grid_w = int(grid_size[0]), int(grid_size[1])
-        else:
-            patch_h, patch_w = self.patch_size
-            grid_h = x.shape[2] // patch_h
-            grid_w = x.shape[3] // patch_w
-        if grid_h * grid_w != n:
+            try:
+                gh, gw = int(grid_size[0]), int(grid_size[1])
+                cands.append((gh * gw, gh, gw))
+            except Exception:
+                pass
+
+        # dynamic_img_pad=True implies ceil; keep floor as fallback for older timm / non-padded inputs
+        gh_ceil = int(math.ceil(x.shape[2] / patch_h))
+        gw_ceil = int(math.ceil(x.shape[3] / patch_w))
+        gh_floor = int(max(1, x.shape[2] // patch_h))
+        gw_floor = int(max(1, x.shape[3] // patch_w))
+        cands.extend([(gh_ceil * gw_ceil, gh_ceil, gw_ceil), (gh_floor * gw_floor, gh_floor, gw_floor)])
+
+        # Prefer the largest patch grid that yields a valid positive prefix (minimizes extra tokens).
+        chosen: tuple[int, int, int] | None = None
+        for n_patches, gh, gw in sorted(set(cands), key=lambda t: t[0], reverse=True):
+            prefix = token_count - int(n_patches)
+            if prefix < 1:
+                continue
+            if int(n_patches) <= 0:
+                continue
+            # Validate: after stripping prefix, we must have exactly n_patches tokens.
+            if tokens[:, prefix:, :].shape[1] == int(n_patches):
+                chosen = (int(n_patches), int(gh), int(gw))
+                break
+
+        if chosen is None:
+            # Last resort: use timm hint if present, then infer square grid.
+            prefix = int(getattr(self.encoder, "num_prefix_tokens", 1))
+            patch_tokens = tokens[:, prefix:, :]
+            n = int(patch_tokens.shape[1])
             grid = int(math.sqrt(n))
             if grid * grid != n:
                 raise RuntimeError(f"Cannot infer token grid from n={n} for input shape={tuple(x.shape)}")
             grid_h = grid_w = grid
+        else:
+            n_patches, grid_h, grid_w = chosen
+            prefix = token_count - int(n_patches)
+            patch_tokens = tokens[:, prefix:, :]
+            n = int(patch_tokens.shape[1])
+            if n != int(n_patches):
+                raise RuntimeError(
+                    f"Token parsing failed: expected n_patches={n_patches} got n={n} (prefix={prefix}) for input shape={tuple(x.shape)}"
+                )
+
+        b, n, c = patch_tokens.shape
 
         feat = patch_tokens.transpose(1, 2).reshape(b, c, grid_h, grid_w)
         logits_patch = self.decoder(feat)

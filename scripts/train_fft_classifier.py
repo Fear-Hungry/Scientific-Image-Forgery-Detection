@@ -1,12 +1,11 @@
 from __future__ import annotations
 
-import _bootstrap  # noqa: F401
-
 import argparse
 import json
 import random
 from pathlib import Path
 
+import _bootstrap  # noqa: F401
 import numpy as np
 import torch
 from torch.utils.data import DataLoader, Subset

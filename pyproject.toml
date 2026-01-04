@@ -12,3 +12,21 @@ requires-python = ">=3.10"
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+extend-exclude = [
+  ".venv",
+  "outputs",
+  "runs",
+  "logs",
+  "data",
+  "notebooks/*.ipynb",
+]
+
+[tool.ruff.lint]
+select = ["E", "F", "I"]
+ignore = ["E501"]
+
+[tool.ruff.lint.per-file-ignores]
+"notebooks/*.py" = ["E402"]

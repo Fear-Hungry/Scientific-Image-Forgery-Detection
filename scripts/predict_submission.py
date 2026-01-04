@@ -1,12 +1,12 @@
 from __future__ import annotations
 
-import _bootstrap  # noqa: F401
-
 import argparse
 import json
 from pathlib import Path
 
+import _bootstrap  # noqa: F401
 import torch
+
 from forgeryseg.submission import write_submission_csv
 
 

@@ -17,9 +17,7 @@ from __future__ import annotations
 # 3. Rode todas as células; o arquivo final fica em `/kaggle/working/submission.csv`.
 #
 # Observação: por regra do repo, a lógica nasce aqui (`.py`) e é espelhada no `.ipynb`.
-
 # %%
-import dataclasses
 import json
 import platform
 import sys
@@ -282,7 +280,6 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
-from tqdm import tqdm
 
 from forgeryseg.dataset import list_cases, load_mask_instances
 from forgeryseg.metric import of1_score

@@ -1,4 +1,4 @@
-from .dinov2_decoder import DinoV2SegmentationModel, DinoTinyDecoder
+from .dinov2_decoder import DinoTinyDecoder, DinoV2SegmentationModel
 from .dinov2_freq_fusion import DinoV2FreqFusionSegmentationModel, FreqFusionSpec
 from .fft_classifier import FFTClassifier
 

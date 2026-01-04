@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-import _bootstrap  # noqa: F401
-
 import argparse
 import json
 from pathlib import Path
+
+import _bootstrap  # noqa: F401
 
 
 def _parse_percent_cells(py_path: Path) -> list[dict]:
@@ -21,13 +21,13 @@ def _parse_percent_cells(py_path: Path) -> list[dict]:
 
         if header.startswith("# %% [markdown]"):
             md_lines: list[str] = []
-            for l in content:
-                if l.startswith("# "):
-                    md_lines.append(l[2:])
-                elif l.startswith("#"):
-                    md_lines.append(l[1:])
+            for line in content:
+                if line.startswith("# "):
+                    md_lines.append(line[2:])
+                elif line.startswith("#"):
+                    md_lines.append(line[1:])
                 else:
-                    md_lines.append(l)
+                    md_lines.append(line)
             source = [s + "\n" for s in md_lines]
             while source and source[-1] == "\n":
                 source.pop()
@@ -79,4 +79,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

@@ -5,7 +5,6 @@ import pytest
 
 from forgeryseg.metric import of1_score
 
-
 pytest.importorskip("scipy")
 
 

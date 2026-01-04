@@ -11,6 +11,7 @@ Este documento mostra “receitas” para os 3 loops mais comuns na competição
 O `Trainer` está em `src/forgeryseg/training/trainer.py` e é usado pelo wrapper:
 
 - `scripts/train_dino_decoder.py`
+ - No Kaggle: `notebooks/fase_01_treino_kaggle.ipynb` (template completo)
 
 Exemplo (treino simples):
 
@@ -53,4 +54,3 @@ Use o script abaixo para gerar submissões no `train/supplemental` e escolher o 
 - `python scripts/ensemble_submissions.py --data-root data/recodai --split test --subs outputs/sub_1.csv outputs/sub_2.csv outputs/sub_3.csv --method weighted --scores 0.324 0.323 0.322 --out outputs/submission.csv --diagnostics outputs/ensemble_diag.csv`
 
 O `--diagnostics` grava um CSV por `case_id` (área final, nº de instâncias, etc.) para depuração.
-

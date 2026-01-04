@@ -55,6 +55,9 @@ Sanity-check (recomendado):
 
 Se você quiser treinar dentro do Kaggle (internet ON), rode os scripts a partir do notebook:
 
+- Notebook pronto (recomendado):
+  - `notebooks/fase_01_treino_kaggle.ipynb` (treina segmentação + FFT e empacota `kaggle_bundle/`)
+
 - Segmentação (DINOv2 + decoder):
   - `python scripts/train_dino_decoder.py --config configs/dino_v3_518_r69.json --data-root /kaggle/input/<COMP_DATASET>/recodai --out /kaggle/working/outputs/models/r69.pth --epochs 5`
 - Classificador FFT (para `fft_gate`):

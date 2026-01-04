@@ -21,6 +21,7 @@ from __future__ import annotations
 # %%
 import dataclasses
 import json
+import platform
 import sys
 from pathlib import Path
 
@@ -28,6 +29,31 @@ import numpy as np
 import pandas as pd
 import torch
 from tqdm import tqdm
+
+print(f"python={sys.version.split()[0]} platform={platform.platform()}")
+print(f"torch={torch.__version__}")
+try:
+    import torchvision  # type: ignore
+
+    print(f"torchvision={torchvision.__version__}")
+except Exception as e:
+    print(f"[warn] torchvision not available ({type(e).__name__}: {e})")
+
+try:
+    import timm  # type: ignore
+
+    print(f"timm={timm.__version__}")
+except Exception as e:
+    print(f"[warn] timm not available ({type(e).__name__}: {e})")
+
+try:
+    import cv2  # type: ignore
+
+    print(f"opencv={cv2.__version__}")
+except Exception as e:
+    print(f"[warn] opencv not available ({type(e).__name__}: {e})")
+
+print(f"numpy={np.__version__} pandas={pd.__version__}")
 
 def _find_code_root() -> Path:
     cwd = Path.cwd()

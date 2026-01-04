@@ -48,6 +48,12 @@ Se você quiser treinar dentro do Kaggle (internet ON), rode os scripts a partir
 - Classificador FFT (para `fft_gate`):
   - `python scripts/train_fft_classifier.py --config configs/fft_classifier_logmag_256.json --data-root /kaggle/input/<COMP_DATASET>/recodai --out /kaggle/working/outputs/models/fft_cls.pth --epochs 5`
 
+Opções úteis:
+
+- `--folds 5` (k-fold estratificado). Saída vira `..._fold0.pth`, `..._fold1.pth`, etc.
+- `--scheduler cosine` (ou `onecycle`) para melhorar convergência.
+- Segmentação: `--aug robust` para aumentar robustez (rotações/escala leve, blur e ruído).
+
 Notas:
 
 - Nos configs DINOv2, `encoder.pretrained=true` é usado **só no treino** (para baixar pesos do timm); na inferência, o código ignora isso quando existe `checkpoint` do modelo completo.
@@ -60,4 +66,3 @@ Você pode gerar uma pasta pronta para upload via:
 - `python scripts/package_kaggle_dataset.py --out-dir kaggle_bundle --include-models`
 
 Depois, crie um Kaggle Dataset a partir de `kaggle_bundle/`.
-

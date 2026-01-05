@@ -173,6 +173,7 @@ SANITY_PROB_THRESHOLD = 0.30
 # Observação: este sweep roda por padrão em um subset (val_fraction) para ser viável no Kaggle.
 TUNE_POSTPROCESS = True
 TUNE_METHOD = "optuna"  # "optuna" (melhor) | "grid" (fallback sem Optuna)
+REQUIRE_OPTUNA = True  # True => não faz fallback; falha se Optuna não estiver disponível
 TUNE_CONFIGS = SEG_CONFIGS  # roda tuner por config (gera tuned_*.json)
 TUNE_SPLIT = EVAL_SPLIT
 TUNE_VAL_FRACTION = 0.10
@@ -680,7 +681,14 @@ if TUNE_POSTPROCESS:
                 tuned_config_paths.append(res.tuned_config_path)
                 print(json.dumps(res.as_dict(), indent=2, ensure_ascii=False))
         except ImportError as e:
-            print(f"[warn] Optuna não disponível ({type(e).__name__}: {e}). Caindo para grid sweep.")
+            msg = f"Optuna não disponível ({type(e).__name__}: {e})"
+            if REQUIRE_OPTUNA:
+                raise RuntimeError(
+                    msg
+                    + ".\n"
+                    + "No Kaggle (internet ON): ative `INSTALL_DEPS=True` ou rode `pip install -r requirements-kaggle.txt`."
+                ) from e
+            print(f"[warn] {msg}. Caindo para grid sweep.")
             tune_method = "grid"
 
     if tune_method == "grid":

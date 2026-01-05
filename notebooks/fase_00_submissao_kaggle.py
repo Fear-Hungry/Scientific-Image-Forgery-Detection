@@ -103,15 +103,22 @@ LIMIT = 0  # 0 = sem limite
 SKIP_MISSING_CONFIGS = True  # se faltar config/ckpt, pula ao invés de quebrar
 
 # 1+ configs para gerar submissões individuais
-CONFIG_PATHS = [
-    CONFIG_ROOT / "dino_v3_518_r69_fft_gate.json",
-    # CONFIG_ROOT / "dino_v2_518_basev1.json",
-    # CONFIG_ROOT / "dino_v1_718_u52.json",
-    # CONFIG_ROOT / "dino_v3_518_r69_freq_fusion.json",
+BASE_CONFIG_PATHS = [
+    # Base + TTA forte (bom custo/benefício)
+    CONFIG_ROOT / "dino_v3_518_r69_fft_gate_tta_plus.json",
+    # Multi-escala (melhor para regiões pequenas + grandes)
+    CONFIG_ROOT / "dino_v4_518_r69_multiscale_fft_gate_tta_plus.json",
+    # Fusão espacial+frequência (diversidade)
+    CONFIG_ROOT / "dino_v3_518_r69_freq_fusion_fft_gate_tta_plus.json",
 ]
 
+# Se existir `configs/tuned_<stem>_optuna_<objective>.json` (vindo do notebook de treino),
+# troca automaticamente pelo tuned (melhor score no val subset).
+AUTO_USE_TUNED = True
+TUNED_OBJECTIVE = "combo"  # mean_score | mean_forged | combo
+
 # ensemble (opcional) se CONFIG_PATHS tiver 2+
-DO_ENSEMBLE = len(CONFIG_PATHS) > 1
+DO_ENSEMBLE = len(BASE_CONFIG_PATHS) > 1
 ENSEMBLE_METHOD = "weighted"  # weighted | majority | union | intersection
 ENSEMBLE_THRESHOLD = 0.5  # só para method="weighted"
 
@@ -119,6 +126,7 @@ ENSEMBLE_THRESHOLD = 0.5  # só para method="weighted"
 # Caso contrário, se SCORES for fornecido, os pesos são derivados automaticamente (melhor score => maior peso).
 WEIGHTS: list[float] | None = None
 SCORES: list[float] | None = None
+AUTO_SCORES_FROM_CKPT = True  # usa `val_of1` do checkpoint para derivar pesos (se disponível)
 
 OUT_DIR = Path("/kaggle/working") if Path("/kaggle/working").exists() else Path("outputs")
 FINAL_OUT = OUT_DIR / "submission.csv"
@@ -160,7 +168,6 @@ def _find_recodai_root() -> Path:
 
 data_root = _find_recodai_root()
 print(f"data_root={data_root}")
-print(f"configs={[p.as_posix() for p in CONFIG_PATHS]}")
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"device={device}")
@@ -170,7 +177,31 @@ except Exception:
     pass
 torch.backends.cudnn.benchmark = True
 
+from forgeryseg.paths import resolve_existing_path
+
+
+def _resolve_config_path(p: Path) -> Path:
+    if p.exists():
+        return p
+    rel = Path("configs") / p.name
+    return resolve_existing_path(rel, roots=[CODE_ROOT], search_kaggle_input=True)
+
+
+def _maybe_use_tuned(base: Path) -> Path:
+    base = _resolve_config_path(base)
+    if not bool(AUTO_USE_TUNED):
+        return base
+    tuned_name = f"tuned_{base.stem}_optuna_{TUNED_OBJECTIVE}.json"
+    tuned_rel = Path("configs") / tuned_name
+    tuned = resolve_existing_path(tuned_rel, roots=[CODE_ROOT], search_kaggle_input=True)
+    return tuned if tuned.exists() else base
+
+
+CONFIG_PATHS = [_maybe_use_tuned(p) for p in BASE_CONFIG_PATHS]
+print(f"configs={[p.as_posix() for p in CONFIG_PATHS]}")
+
 sub_paths: list[Path] = []
+sub_scores: list[float] = []
 for cfg_path in CONFIG_PATHS:
     if not cfg_path.exists():
         msg = f"[warn] Config não encontrado: {cfg_path}"
@@ -190,9 +221,31 @@ for cfg_path in CONFIG_PATHS:
             out_path=out_path,
             device=device,
             limit=LIMIT,
-            path_roots=[Path.cwd(), CODE_ROOT],
+            path_roots=[OUT_DIR, Path.cwd(), CODE_ROOT, CONFIG_ROOT],
+            amp=True,
         )
         sub_paths.append(out_path)
+
+        ckpt = None
+        try:
+            ckpt_rel = cfg.get("model", {}).get("checkpoint")
+            if isinstance(ckpt_rel, str) and ckpt_rel.strip():
+                ckpt = resolve_existing_path(ckpt_rel, roots=[OUT_DIR, CODE_ROOT], search_kaggle_input=True)
+        except Exception:
+            ckpt = None
+
+        if ckpt is not None and ckpt.exists():
+            try:
+                d = torch.load(ckpt, map_location="cpu")
+                v = d.get("val_of1", None)
+                if isinstance(v, (int, float)):
+                    sub_scores.append(float(v))
+                else:
+                    sub_scores.append(float("nan"))
+            except Exception:
+                sub_scores.append(float("nan"))
+        else:
+            sub_scores.append(float("nan"))
     except FileNotFoundError as e:
         if SKIP_MISSING_CONFIGS:
             print(f"[warn] {e} (pulando {cfg_path.name})")
@@ -203,6 +256,16 @@ if not sub_paths:
     raise RuntimeError("Nenhuma submissão foi gerada (verifique configs/checkpoints).")
 
 if DO_ENSEMBLE and len(sub_paths) > 1:
+    if (
+        SCORES is None
+        and WEIGHTS is None
+        and AUTO_SCORES_FROM_CKPT
+        and len(sub_scores) == len(sub_paths)
+        and all(not (s != s) for s in sub_scores)  # not NaN
+    ):
+        SCORES = list(sub_scores)
+        print(f"[info] Using SCORES from checkpoints: {SCORES}")
+
     ensemble_submissions_from_csvs(
         sub_paths=sub_paths,
         data_root=data_root,

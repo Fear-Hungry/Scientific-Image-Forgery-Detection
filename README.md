@@ -53,6 +53,7 @@ python scripts/predict_submission.py --config configs/dino_v3_518_r69_fft_gate.j
 - Modelo multi-escala (features de múltiplas camadas do ViT): `model.type=dinov2_multiscale` + exemplo em `configs/dino_v4_518_r69_multiscale.json`.
 - Pós-processamento refinado: hysteresis (`prob_threshold_low`), ordem/2ª passada de morfologia (`morph_order`, `final_*_kernel`) e `fill_holes` (e Optuna atualizado para tunar isso).
 - Aug/TTA: `train.cutmix_*` (CutMix opcional), augmentations `robust` com JPEG artifacts + `RandomRotate90`, e TTA customizável via `inference.tta.modes` (ex.: `configs/dino_v3_518_r69_fft_gate_tta_plus.json`).
+- Notebooks Kaggle mais “prontos para score”: `notebooks/fase_01_treino_kaggle.ipynb` treina/tuna múltiplas configs e copia `tuned_*.json` para o bundle; `notebooks/fase_00_submissao_kaggle.ipynb` usa configs `*_tta_plus` e prefere automaticamente `tuned_*_optuna_*.json` (se existir), com AMP e pesos de ensemble derivados do `val_of1` do checkpoint.
 
 ## Citação
 

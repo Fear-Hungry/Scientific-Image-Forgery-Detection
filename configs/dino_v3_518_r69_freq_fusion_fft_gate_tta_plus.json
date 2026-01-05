@@ -1,17 +1,23 @@
 {
-  "name": "v3_r69_518_fft_gate_tta_plus",
+  "name": "v3_r69_518_freq_fusion_fft_gate_tta_plus",
   "model": {
-    "type": "dinov2",
+    "type": "dinov2_freq_fusion",
     "input_size": 518,
     "encoder": {
       "model_name": "vit_base_patch14_reg4_dinov2",
       "checkpoint_path": null,
       "pretrained": true
     },
-    "checkpoint": "outputs/models/r69.pth",
+    "checkpoint": "outputs/models/r69_freq_fusion.pth",
     "decoder_hidden_channels": 256,
     "decoder_dropout": 0.0,
-    "freeze_encoder": true
+    "freeze_encoder": true,
+    "freq_fusion": {
+      "mode": "lp_hp",
+      "hp_radius_fraction": 0.12,
+      "freq_channels": 64,
+      "normalize": "zscore"
+    }
   },
   "inference": {
     "batch_size": 4,
@@ -65,7 +71,7 @@
     "folds": 5,
     "fold": -1,
     "aug": "robust",
-    "cutmix_prob": 0.5,
+    "cutmix_prob": 0.3,
     "cutmix_alpha": 1.0,
     "scheduler": "cosine",
     "lr_min": 1e-6,
@@ -75,3 +81,4 @@
     "min_delta": 0.0
   }
 }
+

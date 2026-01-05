@@ -287,6 +287,7 @@ class Trainer:
             raise ValueError(f"Unknown scheduler: {self.config.train.scheduler}")
 
         ckpt_path = fold_out_path(self.out_path, fold=fold_id, folds=int(self.config.train.folds))
+        last_ckpt_path = ckpt_path.with_name(f"{ckpt_path.stem}_last{ckpt_path.suffix}")
         log_csv = fold_out_path(self.out_path.with_suffix(".csv"), fold=fold_id, folds=int(self.config.train.folds))
         log_json = fold_out_path(self.out_path.with_suffix(".json"), fold=fold_id, folds=int(self.config.train.folds))
 
@@ -366,6 +367,23 @@ class Trainer:
                 )
             else:
                 bad_epochs += 1
+
+            # Always save a "last" checkpoint (overwritten each epoch) so partial runs can be used.
+            if bool(getattr(self.config.train, "save_last", True)):
+                last_ckpt_path.parent.mkdir(parents=True, exist_ok=True)
+                torch.save(
+                    {
+                        "model": model.state_dict(),
+                        "config": dataclasses.asdict(self.config),
+                        "fold": int(fold_id),
+                        "epoch": int(epoch),
+                        "train_loss": float(train_loss),
+                        "val_loss": float(val_loss),
+                        "val_of1": float(val_of1),
+                        "is_best": bool(is_best),
+                    },
+                    last_ckpt_path,
+                )
 
             lr = float(opt.param_groups[0]["lr"])
             elapsed = float(time.time() - start)

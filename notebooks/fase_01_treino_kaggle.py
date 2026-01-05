@@ -455,6 +455,9 @@ if TRAIN_SEG:
         name = str(cfg_json.get("name", cfg_path.stem))
         ckpt_rel = str(cfg_json.get("model", {}).get("checkpoint", "outputs/models/model.pth"))
         out_path = OUT_DIR / ckpt_rel
+        expected_folds = int(cfg_json.get("train", {}).get("folds", 1))
+        if not bool(USE_CONFIG_TRAIN_DEFAULTS):
+            expected_folds = int(SEG_FOLDS)
 
         seg_overrides: list[str] = []
         if not bool(USE_CONFIG_TRAIN_DEFAULTS):
@@ -479,34 +482,64 @@ if TRAIN_SEG:
             seg_overrides.append(f"train.cutmix_alpha={float(SEG_CUTMIX_ALPHA)}")
 
         print(f"\n[train:seg] config={cfg_path.name} name={name} out={out_path}")
-        seg_result = train_dino_decoder(
-            config_path=cfg_path,
-            data_root=data_root,
-            out_path=out_path,
-            device=device_str,
-            split="train",
-            overrides=seg_overrides if seg_overrides else None,
-            epochs=None,
-            batch_size=None,
-            lr=None,
-            weight_decay=None,
-            num_workers=None,
-            folds=None,
-            fold=None,
-            aug=None,
-            scheduler=None,
-            patience=None,
-        )
-        seg_results[name] = seg_result
+        seg_result = None
+        try:
+            seg_result = train_dino_decoder(
+                config_path=cfg_path,
+                data_root=data_root,
+                out_path=out_path,
+                device=device_str,
+                split="train",
+                overrides=seg_overrides if seg_overrides else None,
+                epochs=None,
+                batch_size=None,
+                lr=None,
+                weight_decay=None,
+                num_workers=None,
+                folds=None,
+                fold=None,
+                aug=None,
+                scheduler=None,
+                patience=None,
+            )
+            seg_results[name] = seg_result
+        except Exception as e:
+            print(f"[train:seg][error] {cfg_path.name}: {type(e).__name__}: {e}")
+            seg_results[name] = {"error": f"{type(e).__name__}: {e}", "config": str(cfg_path)}
 
         # Se treinou k-fold, copia o melhor fold para o path "base" (ex.: r69.pth),
         # para facilitar o uso em configs que apontam para outputs/models/*.pth.
+        copied = False
         if getattr(seg_result, "fold_results", None) is not None and len(seg_result.fold_results) > 1:
             best = max(seg_result.fold_results, key=lambda fr: fr.best_val_of1)
             if Path(best.checkpoint_path) != Path(out_path):
                 Path(out_path).parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(best.checkpoint_path, out_path)
+                copied = True
                 print(f"[train:seg] Copied best fold -> {out_path} (from {best.checkpoint_path})")
+
+        # Fallback: se o treino quebrou no meio, tenta escolher o melhor checkpoint já salvo e criar o "base".
+        if not copied and not out_path.exists():
+            candidates: list[Path] = []
+            out_last = out_path.with_name(f"{out_path.stem}_last{out_path.suffix}")
+            if out_last.exists():
+                candidates.append(out_last)
+            if int(expected_folds) > 1:
+                candidates.extend(sorted(out_path.parent.glob(f"{out_path.stem}_fold*{out_path.suffix}")))
+
+            def _val_of1(p: Path) -> float:
+                try:
+                    d = torch.load(p, map_location="cpu")
+                    v = d.get("val_of1", None)
+                    return float(v) if isinstance(v, (int, float)) else float("-inf")
+                except Exception:
+                    return float("-inf")
+
+            best_path = max(candidates, key=_val_of1, default=None)
+            if best_path is not None and best_path.exists():
+                out_path.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(best_path, out_path)
+                print(f"[train:seg] Fallback copied -> {out_path} (from {best_path})")
 
 # %%
 # -----
@@ -515,19 +548,23 @@ if TRAIN_SEG:
 
 fft_saved = None
 if TRAIN_FFT:
-    fft_saved = train_fft_classifier(
-        config_path=FFT_TRAIN_CONFIG,
-        data_root=data_root,
-        out_path=FFT_OUT,
-        device=device,
-        epochs=int(FFT_EPOCHS),
-        batch_size=int(FFT_BATCH),
-        lr=float(FFT_LR),
-        weight_decay=float(FFT_WD),
-        num_workers=int(FFT_NUM_WORKERS),
-        folds=int(FFT_FOLDS),
-        scheduler=FFT_SCHEDULER,  # type: ignore[arg-type]
-    )
+    try:
+        fft_saved = train_fft_classifier(
+            config_path=FFT_TRAIN_CONFIG,
+            data_root=data_root,
+            out_path=FFT_OUT,
+            device=device,
+            epochs=int(FFT_EPOCHS),
+            batch_size=int(FFT_BATCH),
+            lr=float(FFT_LR),
+            weight_decay=float(FFT_WD),
+            num_workers=int(FFT_NUM_WORKERS),
+            folds=int(FFT_FOLDS),
+            scheduler=FFT_SCHEDULER,  # type: ignore[arg-type]
+        )
+    except Exception as e:
+        print(f"[train:fft][error] {type(e).__name__}: {e}")
+        fft_saved = []
 
     if fft_saved and int(FFT_FOLDS) > 1:
         # escolhe melhor fold por menor val_loss no checkpoint
@@ -539,6 +576,14 @@ if TRAIN_FFT:
             FFT_OUT.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(best_path, FFT_OUT)
             print(f"Copied best FFT fold -> {FFT_OUT} (from {best_path})")
+    elif int(FFT_FOLDS) > 1 and not FFT_OUT.exists():
+        # Fallback: tenta encontrar algum fold salvo no disco.
+        cands = sorted(FFT_OUT.parent.glob(f"{FFT_OUT.stem}_fold*{FFT_OUT.suffix}"))
+        if cands:
+            best_path = min(cands, key=lambda p: float(torch.load(p, map_location="cpu").get("val_loss", float("inf"))))
+            FFT_OUT.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(best_path, FFT_OUT)
+            print(f"Copied best FFT fold (fallback) -> {FFT_OUT} (from {best_path})")
 
 # %%
 # -------------------------
@@ -556,17 +601,21 @@ if EVAL_AFTER_TRAIN:
         name = str(cfg.get("name", eval_cfg.stem))
         eval_csv = OUT_DIR / f"submission_{name}_{EVAL_SPLIT}.csv"
 
-        stats = write_submission_csv(
-            config_path=eval_cfg,
-            data_root=data_root,
-            split=EVAL_SPLIT,  # type: ignore[arg-type]
-            out_path=eval_csv,
-            device=device,
-            limit=int(EVAL_LIMIT),
-            path_roots=[OUT_DIR, CODE_ROOT, CONFIG_ROOT],
-            amp=True,
-        )
-        print(stats)
+        try:
+            stats = write_submission_csv(
+                config_path=eval_cfg,
+                data_root=data_root,
+                split=EVAL_SPLIT,  # type: ignore[arg-type]
+                out_path=eval_csv,
+                device=device,
+                limit=int(EVAL_LIMIT),
+                path_roots=[OUT_DIR, CODE_ROOT, CONFIG_ROOT],
+                amp=True,
+            )
+            print(stats)
+        except FileNotFoundError as e:
+            print(f"[warn] eval skipped (missing ckpt): {e}")
+            continue
 
         fmt = validate_submission_format(eval_csv, data_root=data_root, split=EVAL_SPLIT)  # type: ignore[arg-type]
         print("\n[Format check]")
@@ -662,24 +711,28 @@ if TUNE_POSTPROCESS:
                     continue
 
                 print(f"\n[tune:optuna] config={cfg_path.name} objective={OPTUNA_OBJECTIVE}")
-                res = tune_postprocess_optuna(
-                    config_path=cfg_path,
-                    data_root=data_root,
-                    split=TUNE_SPLIT,  # type: ignore[arg-type]
-                    out_dir=optuna_out,
-                    device=device,
-                    base_overrides=base_overrides,
-                    val_fraction=float(TUNE_VAL_FRACTION),
-                    seed=int(TUNE_SEED),
-                    limit=int(TUNE_LIMIT),
-                    use_tta=bool(TUNE_USE_TTA),
-                    batch_size=int(TUNE_BATCH),
-                    n_trials=int(OPTUNA_TRIALS),
-                    timeout_sec=OPTUNA_TIMEOUT_SEC,
-                    objective=OPTUNA_OBJECTIVE,  # type: ignore[arg-type]
-                )
-                tuned_config_paths.append(res.tuned_config_path)
-                print(json.dumps(res.as_dict(), indent=2, ensure_ascii=False))
+                try:
+                    res = tune_postprocess_optuna(
+                        config_path=cfg_path,
+                        data_root=data_root,
+                        split=TUNE_SPLIT,  # type: ignore[arg-type]
+                        out_dir=optuna_out,
+                        device=device,
+                        base_overrides=base_overrides,
+                        val_fraction=float(TUNE_VAL_FRACTION),
+                        seed=int(TUNE_SEED),
+                        limit=int(TUNE_LIMIT),
+                        use_tta=bool(TUNE_USE_TTA),
+                        batch_size=int(TUNE_BATCH),
+                        n_trials=int(OPTUNA_TRIALS),
+                        timeout_sec=OPTUNA_TIMEOUT_SEC,
+                        objective=OPTUNA_OBJECTIVE,  # type: ignore[arg-type]
+                    )
+                    tuned_config_paths.append(res.tuned_config_path)
+                    print(json.dumps(res.as_dict(), indent=2, ensure_ascii=False))
+                except FileNotFoundError as e:
+                    print(f"[warn] tuning skipped (missing ckpt): {e}")
+                    continue
         except ImportError as e:
             msg = f"Optuna não disponível ({type(e).__name__}: {e})"
             if REQUIRE_OPTUNA:
@@ -710,13 +763,17 @@ if TUNE_POSTPROCESS:
             )
 
             # Load engine once (model + input_size). Postprocess will be replaced per-threshold.
-            engine = InferenceEngine.from_config(
-                config_path=cfg_path,
-                device=device,
-                overrides=base_overrides,
-                path_roots=[OUT_DIR, CODE_ROOT, CONFIG_ROOT],
-                amp=True,
-            )
+            try:
+                engine = InferenceEngine.from_config(
+                    config_path=cfg_path,
+                    device=device,
+                    overrides=base_overrides,
+                    path_roots=[OUT_DIR, CODE_ROOT, CONFIG_ROOT],
+                    amp=True,
+                )
+            except FileNotFoundError as e:
+                print(f"[warn] tuning skipped (missing ckpt): {e}")
+                continue
 
             # Define validation subset (stratified).
             all_cases = list_cases(data_root, TUNE_SPLIT, include_authentic=True, include_forged=True)

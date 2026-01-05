@@ -69,9 +69,79 @@ def _load_segmentation_model(
         )
 
     if ckpt:
-        ckpt_path = resolve_existing_path(ckpt, roots=path_roots, search_kaggle_input=True)
+        ckpt_rel = Path(ckpt)
+        ckpt_path = resolve_existing_path(ckpt_rel, roots=path_roots, search_kaggle_input=True)
+
+        def _pick_best_by_val_of1(paths: list[Path]) -> Path | None:
+            best_p: Path | None = None
+            best_s = float("-inf")
+            best_mtime = float("-inf")
+            for p in paths:
+                if not p.exists():
+                    continue
+                try:
+                    d = torch.load(p, map_location="cpu")
+                    v = d.get("val_of1", None)
+                    s = float(v) if isinstance(v, (int, float)) else float("-inf")
+                except Exception:
+                    s = float("-inf")
+                try:
+                    mtime = float(p.stat().st_mtime)
+                except Exception:
+                    mtime = float("-inf")
+
+                if (s > best_s) or (s == best_s and mtime > best_mtime):
+                    best_p = p
+                    best_s = s
+                    best_mtime = mtime
+            return best_p
+
+        if not ckpt_path.exists():
+            # Fallback 1: try "<stem>_last.pth"
+            ckpt_last_rel = ckpt_rel.with_name(f"{ckpt_rel.stem}_last{ckpt_rel.suffix}")
+            ckpt_last_path = resolve_existing_path(ckpt_last_rel, roots=path_roots, search_kaggle_input=True)
+            if ckpt_last_path.exists():
+                print(f"[warn] Checkpoint não encontrado: {ckpt_rel} (usando fallback: {ckpt_last_path})")
+                ckpt_path = ckpt_last_path
+            else:
+                # Fallback 2: if base ckpt missing, try best fold checkpoint (e.g., <stem>_fold{i}.pth)
+                if "_fold" not in ckpt_rel.stem:
+                    pattern = f"{ckpt_rel.stem}_fold*{ckpt_rel.suffix}"
+                    candidates: list[Path] = []
+                    parent_rel = ckpt_rel.parent
+
+                    if path_roots is not None:
+                        for root in path_roots:
+                            base = Path(root) / parent_rel
+                            if base.exists():
+                                candidates.extend(base.glob(pattern))
+
+                    kaggle_input = Path("/kaggle/input")
+                    if kaggle_input.exists():
+                        for d in kaggle_input.iterdir():
+                            if not d.is_dir():
+                                continue
+                            base = d / parent_rel
+                            if base.exists():
+                                candidates.extend(base.glob(pattern))
+                            try:
+                                for child in d.iterdir():
+                                    if not child.is_dir():
+                                        continue
+                                    base2 = child / parent_rel
+                                    if base2.exists():
+                                        candidates.extend(base2.glob(pattern))
+                            except PermissionError:
+                                continue
+
+                    best = _pick_best_by_val_of1(candidates)
+                    if best is not None and best.exists():
+                        print(f"[warn] Checkpoint não encontrado: {ckpt_rel} (usando melhor fold: {best})")
+                        ckpt_path = best
+
         if not ckpt_path.exists():
             raise FileNotFoundError(f"Checkpoint não encontrado: {ckpt} (tentado: {ckpt_path})")
+
         missing, unexpected = load_flexible_state_dict(model, ckpt_path)
         warn_state_dict(missing, unexpected)
 

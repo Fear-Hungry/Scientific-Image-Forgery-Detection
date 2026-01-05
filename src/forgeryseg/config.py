@@ -334,6 +334,7 @@ class SegmentationTrainConfig:
     pct_start: float = 0.1
     patience: int = 0
     min_delta: float = 0.0
+    save_last: bool = True
 
     @classmethod
     def from_dict(cls, d: dict[str, Any] | None) -> SegmentationTrainConfig:
@@ -357,6 +358,7 @@ class SegmentationTrainConfig:
             pct_start=float(d.get("pct_start", cls.pct_start)),
             patience=int(d.get("patience", cls.patience)),
             min_delta=float(d.get("min_delta", cls.min_delta)),
+            save_last=bool(d.get("save_last", cls.save_last)),
         )
 
 

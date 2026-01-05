@@ -47,6 +47,10 @@ Quando você quer ir além do sweep de threshold, use Optuna para ajustar vário
 
 - `python scripts/optuna_tune_postprocess.py --config configs/dino_v3_518_r69_fft_gate.json --data-root data/recodai --split train --out-dir outputs/optuna --val-fraction 0.10 --trials 200 --objective mean_score --set inference.fft_gate.enabled=false`
 
+Se você treinar com k-fold (`--folds 5`), dá para tunar no val de um fold específico:
+
+- `python scripts/optuna_tune_postprocess.py --config configs/dino_v3_518_r69_fft_gate.json --data-root data/recodai --split train --out-dir outputs/optuna --folds 5 --fold 0 --trials 200 --objective mean_score --set inference.fft_gate.enabled=false`
+
 Saídas importantes:
 
 - `outputs/optuna/optuna_best.json`: melhor score e overrides.

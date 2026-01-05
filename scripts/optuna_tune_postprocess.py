@@ -19,6 +19,8 @@ def main() -> None:
 
     ap.add_argument("--val-fraction", type=float, default=0.10)
     ap.add_argument("--seed", type=int, default=42)
+    ap.add_argument("--folds", type=int, default=1, help="If >1, tune on a specific fold validation set.")
+    ap.add_argument("--fold", type=int, default=0, help="Fold id to use when --folds > 1.")
     ap.add_argument("--limit", type=int, default=0, help="Optional limit of val cases (stratified).")
 
     ap.add_argument("--use-tta", action="store_true", help="Use config TTA during inference (slower, more faithful).")
@@ -47,6 +49,8 @@ def main() -> None:
         base_overrides=args.overrides,
         val_fraction=float(args.val_fraction),
         seed=int(args.seed),
+        folds=int(args.folds),
+        fold=int(args.fold),
         limit=int(args.limit),
         use_tta=bool(args.use_tta),
         batch_size=int(args.batch_size),
@@ -59,4 +63,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

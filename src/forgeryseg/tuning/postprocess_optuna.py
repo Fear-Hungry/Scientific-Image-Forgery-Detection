@@ -226,6 +226,8 @@ def tune_postprocess_optuna(
     base_overrides: Iterable[str] | None = None,
     val_fraction: float = 0.10,
     seed: int = 42,
+    folds: int = 1,
+    fold: int = 0,
     limit: int = 0,
     use_tta: bool = True,
     batch_size: int = 4,
@@ -270,8 +272,13 @@ def tune_postprocess_optuna(
     # Validation subset
     all_cases = list_cases(data_root, split, include_authentic=True, include_forged=True)
     labels = np.asarray([1 if c.mask_path is not None else 0 for c in all_cases], dtype=np.int64)
-    split_iter = stratified_splits(labels, folds=1, val_fraction=float(val_fraction), seed=int(seed))
-    _, _, val_idx = next(iter(split_iter))
+    splits = stratified_splits(labels, folds=int(folds), val_fraction=float(val_fraction), seed=int(seed))
+    if int(folds) > 1:
+        if not (0 <= int(fold) < int(folds)):
+            raise ValueError("fold must be in [0, folds)")
+        _, _, val_idx = next((f_id, tr, va) for f_id, tr, va in splits if int(f_id) == int(fold))
+    else:
+        _, _, val_idx = splits[0]
     val_cases = [all_cases[int(i)] for i in val_idx.tolist()]
     val_cases = _select_stratified_subset(val_cases, seed=int(seed), limit=int(limit))
 
@@ -319,22 +326,22 @@ def tune_postprocess_optuna(
     study = optuna.create_study(direction="maximize", sampler=sampler, pruner=pruner)
 
     def _objective(trial) -> float:
-        prob_threshold = trial.suggest_float("prob_threshold", 0.05, 0.90)
-        gaussian_sigma = trial.suggest_float("gaussian_sigma", 0.0, 2.0)
-        sobel_weight = trial.suggest_float("sobel_weight", 0.0, 0.35)
+        prob_threshold = trial.suggest_float("prob_threshold", 0.20, 0.60)
+        gaussian_sigma = trial.suggest_float("gaussian_sigma", 0.0, 1.5)
+        sobel_weight = trial.suggest_float("sobel_weight", 0.0, 0.25)
         open_kernel = trial.suggest_categorical("open_kernel", [0, 3, 5, 7])
-        close_kernel = trial.suggest_categorical("close_kernel", [0, 3, 5, 7])
-        min_area = trial.suggest_int("min_area", 0, 600, step=8)
-        min_mean_conf = trial.suggest_float("min_mean_conf", 0.0, 0.5)
+        close_kernel = trial.suggest_categorical("close_kernel", [0, 3, 5, 7, 9, 11])
+        min_area = trial.suggest_int("min_area", 0, 400, step=8)
+        min_mean_conf = trial.suggest_float("min_mean_conf", 0.0, 0.35)
         min_prob_std = trial.suggest_float("min_prob_std", 0.0, 0.35)
 
         use_small_gate = trial.suggest_categorical("use_small_gate", [False, True])
-        small_area = trial.suggest_int("small_area", 0, 800, step=16) if use_small_gate else None
-        small_min_mean_conf = trial.suggest_float("small_min_mean_conf", 0.0, 0.99) if use_small_gate else None
+        small_area = trial.suggest_int("small_area", 0, 1500, step=16) if use_small_gate else None
+        small_min_mean_conf = trial.suggest_float("small_min_mean_conf", 0.40, 0.90) if use_small_gate else None
 
         use_auth_gate = trial.suggest_categorical("use_auth_gate", [False, True])
-        authentic_area_max = trial.suggest_int("authentic_area_max", 0, 800, step=16) if use_auth_gate else None
-        authentic_conf_max = trial.suggest_float("authentic_conf_max", 0.0, 0.99) if use_auth_gate else None
+        authentic_area_max = trial.suggest_int("authentic_area_max", 0, 1500, step=16) if use_auth_gate else None
+        authentic_conf_max = trial.suggest_float("authentic_conf_max", 0.40, 0.90) if use_auth_gate else None
 
         post = PostprocessParams(
             prob_threshold=float(prob_threshold),

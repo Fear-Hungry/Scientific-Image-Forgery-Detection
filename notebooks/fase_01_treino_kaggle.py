@@ -136,17 +136,23 @@ EVAL_LIMIT = 0  # 0 = sem limite (usa tudo)
 #
 # Observação: este sweep roda por padrão em um subset (val_fraction) para ser viável no Kaggle.
 TUNE_POSTPROCESS = True
+TUNE_METHOD = "optuna"  # "optuna" (melhor) | "grid" (fallback sem Optuna)
 TUNE_CONFIG = CONFIG_ROOT / "dino_v3_518_r69_fft_gate.json"
 TUNE_SPLIT = EVAL_SPLIT
 TUNE_VAL_FRACTION = 0.10
 TUNE_SEED = 42
 TUNE_LIMIT = 0  # 0 = usa todo o subset de validação
 TUNE_BATCH = 4  # ajuste conforme VRAM
-TUNE_USE_TTA = False  # True = mais fiel ao config, porém mais lento
+TUNE_USE_TTA = True  # mais fiel ao config (tende a dar melhor tuning, mas é mais lento)
 TUNE_THR_START = 0.20
 TUNE_THR_STOP = 0.60
 TUNE_THR_STEP = 0.05
 TUNE_WRITE_TUNED_CONFIG = True
+
+# Optuna (Bayesian Optimization)
+OPTUNA_TRIALS = 200
+OPTUNA_TIMEOUT_SEC = None  # ex.: 1800 (30 min)
+OPTUNA_OBJECTIVE = "mean_score"  # mean_score | mean_forged | combo
 
 # Empacotar um folder pronto para upload como Kaggle Dataset (offline):
 DO_PACKAGE = True
@@ -298,11 +304,12 @@ if EVAL_AFTER_TRAIN:
 
 # %%
 # -------------------------
-# Postprocess sweep (threshold)
+# Postprocess tuning (threshold / optuna)
 # -------------------------
 #
-# Faz um sweep do `prob_threshold` com overrides "relaxados" (desliga filtros agressivos)
-# em um subset de validação estratificado (authentic vs forged).
+# Faz tuning do pós-processamento em um subset de validação estratificado (authentic vs forged):
+# - método "optuna": otimização bayesiana (melhor, tunando vários parâmetros)
+# - método "grid": sweep simples só em `prob_threshold` (fallback)
 
 if TUNE_POSTPROCESS:
     import dataclasses
@@ -320,6 +327,8 @@ if TUNE_POSTPROCESS:
     from forgeryseg.metric import of1_score
     from forgeryseg.postprocess import PostprocessParams, postprocess_prob
     from forgeryseg.training.utils import stratified_splits
+
+    tuned_config_path = None
 
     def _frange(start: float, stop: float, step: float) -> list[float]:
         if step <= 0:
@@ -365,203 +374,229 @@ if TUNE_POSTPROCESS:
         "inference.postprocess.sobel_weight=0.0",
     ]
 
-    thresholds = _frange(float(TUNE_THR_START), float(TUNE_THR_STOP), float(TUNE_THR_STEP))
-    if not thresholds:
-        raise RuntimeError("No thresholds configured")
+    if str(TUNE_METHOD).lower() == "optuna":
+        try:
+            from forgeryseg.tuning import tune_postprocess_optuna
 
-    print(
-        f"[tune] split={TUNE_SPLIT} val_fraction={TUNE_VAL_FRACTION} "
-        f"n_thresholds={len(thresholds)} use_tta={TUNE_USE_TTA} batch={TUNE_BATCH}"
-    )
+            optuna_out = OUT_DIR / "optuna"
+            res = tune_postprocess_optuna(
+                config_path=TUNE_CONFIG,
+                data_root=data_root,
+                split=TUNE_SPLIT,  # type: ignore[arg-type]
+                out_dir=optuna_out,
+                device=device,
+                base_overrides=base_overrides,
+                val_fraction=float(TUNE_VAL_FRACTION),
+                seed=int(TUNE_SEED),
+                limit=int(TUNE_LIMIT),
+                use_tta=bool(TUNE_USE_TTA),
+                batch_size=int(TUNE_BATCH),
+                n_trials=int(OPTUNA_TRIALS),
+                timeout_sec=OPTUNA_TIMEOUT_SEC,
+                objective=OPTUNA_OBJECTIVE,  # type: ignore[arg-type]
+            )
+            tuned_config_path = res.tuned_config_path
+        except ImportError as e:
+            print(f"[warn] Optuna não disponível ({type(e).__name__}: {e}). Caindo para grid sweep.")
+            TUNE_METHOD = "grid"
 
-    # Load engine once (model + input_size). Postprocess will be replaced per-threshold.
-    engine = InferenceEngine.from_config(
-        config_path=TUNE_CONFIG,
-        device=device,
-        overrides=base_overrides,
-        path_roots=[OUT_DIR, CODE_ROOT, CONFIG_ROOT],
-        amp=True,
-    )
+    if str(TUNE_METHOD).lower() == "grid":
+        thresholds = _frange(float(TUNE_THR_START), float(TUNE_THR_STOP), float(TUNE_THR_STEP))
+        if not thresholds:
+            raise RuntimeError("No thresholds configured")
 
-    # Define validation subset (stratified).
-    all_cases = list_cases(data_root, TUNE_SPLIT, include_authentic=True, include_forged=True)
-    labels = np.asarray([1 if c.mask_path is not None else 0 for c in all_cases], dtype=np.int64)
-    split_iter = stratified_splits(
-        labels,
-        folds=1,
-        val_fraction=float(TUNE_VAL_FRACTION),
-        seed=int(TUNE_SEED),
-    )
-    _, _, val_idx = next(iter(split_iter))
-    val_cases = [all_cases[int(i)] for i in val_idx.tolist()]
-    val_cases = _select_stratified_subset(val_cases, seed=int(TUNE_SEED), limit=int(TUNE_LIMIT))
-    n_auth = sum(1 for c in val_cases if c.mask_path is None)
-    n_forg = sum(1 for c in val_cases if c.mask_path is not None)
-    print(f"[tune] val_cases={len(val_cases)} authentic={n_auth} forged={n_forg}")
-
-    # Fixed postprocess (with overrides applied), except prob_threshold.
-    base_post: PostprocessParams = engine.postprocess
-
-    # Accumulators per threshold
-    acc: dict[float, dict[str, float | int]] = {
-        thr: {
-            "sum_all": 0.0,
-            "sum_auth": 0.0,
-            "sum_forg": 0.0,
-            "n_all": 0,
-            "n_auth": 0,
-            "n_forg": 0,
-            "auth_pred_as_forged": 0,
-            "forg_pred_as_auth": 0,
-        }
-        for thr in thresholds
-    }
-
-    def _predict_prob_maps_no_tta(images: list[np.ndarray]) -> list[np.ndarray]:
-        from forgeryseg.image import letterbox_reflect, unletterbox
-
-        padded = []
-        metas = []
-        for img in images:
-            pad, meta = letterbox_reflect(img, int(engine.input_size))
-            padded.append(pad)
-            metas.append(meta)
-
-        x = torch.stack(
-            [torch.from_numpy(im).permute(2, 0, 1).contiguous().float() / 255.0 for im in padded],
-            dim=0,
-        ).to(engine.device)
-
-        with torch.no_grad():
-            if engine.amp and engine.device.type == "cuda":
-                with torch.autocast(device_type="cuda", dtype=torch.float16):
-                    logits = engine.model(x)
-            else:
-                logits = engine.model(x)
-            prob = torch.sigmoid(logits)[:, 0].float()
-
-        prob_np = prob.detach().cpu().numpy().astype(np.float32)
-        return [unletterbox(prob_np[i], metas[i]).astype(np.float32) for i in range(len(metas))]
-
-    t0 = time.time()
-    bs = int(max(1, TUNE_BATCH))
-    for i in tqdm(range(0, len(val_cases), bs), desc="[tune] infer"):
-        batch_cases = val_cases[i : i + bs]
-        images = [load_rgb(c.image_path) for c in batch_cases]
-
-        if bool(TUNE_USE_TTA):
-            probs = engine._predict_prob_maps_batched(images)
-        else:
-            probs = _predict_prob_maps_no_tta(images)
-
-        for case, prob in zip(batch_cases, probs, strict=True):
-            gt_instances = [] if case.mask_path is None else load_mask_instances(case.mask_path)
-            gt_is_auth = case.mask_path is None
-
-            for thr in thresholds:
-                post = dataclasses.replace(base_post, prob_threshold=float(thr))
-                pred_instances = postprocess_prob(prob, post)
-                pred_is_auth = len(pred_instances) == 0
-
-                if gt_is_auth:
-                    s = 1.0 if pred_is_auth else 0.0
-                    if not pred_is_auth:
-                        acc[thr]["auth_pred_as_forged"] = int(acc[thr]["auth_pred_as_forged"]) + 1
-                    acc[thr]["sum_auth"] = float(acc[thr]["sum_auth"]) + float(s)
-                    acc[thr]["n_auth"] = int(acc[thr]["n_auth"]) + 1
-                else:
-                    if pred_is_auth:
-                        acc[thr]["forg_pred_as_auth"] = int(acc[thr]["forg_pred_as_auth"]) + 1
-                        s = 0.0
-                    else:
-                        s = float(of1_score(pred_instances, gt_instances))
-                    acc[thr]["sum_forg"] = float(acc[thr]["sum_forg"]) + float(s)
-                    acc[thr]["n_forg"] = int(acc[thr]["n_forg"]) + 1
-
-                acc[thr]["sum_all"] = float(acc[thr]["sum_all"]) + float(s)
-                acc[thr]["n_all"] = int(acc[thr]["n_all"]) + 1
-
-    dt = time.time() - t0
-    print(f"[tune] done in {dt:.1f}s")
-
-    best_thr = None
-    best_score = -math.inf
-    results: list[tuple[float, ScoreSummary]] = []
-    for thr in thresholds:
-        a = acc[thr]
-        n_all = int(a["n_all"])
-        n_auth = int(a["n_auth"])
-        n_forg = int(a["n_forg"])
-        mean_all = float(a["sum_all"]) / max(1, n_all)
-        mean_auth = float(a["sum_auth"]) / max(1, n_auth)
-        mean_forg = float(a["sum_forg"]) / max(1, n_forg)
-        summary = ScoreSummary(
-            mean_score=mean_all,
-            mean_authentic=mean_auth,
-            mean_forged=mean_forg,
-            n_cases=n_all,
-            n_authentic=n_auth,
-            n_forged=n_forg,
-            auth_pred_as_forged=int(a["auth_pred_as_forged"]),
-            forg_pred_as_auth=int(a["forg_pred_as_auth"]),
-            decode_errors_scoring=0,
-        )
-        results.append((thr, summary))
-        if mean_all > best_score:
-            best_score = mean_all
-            best_thr = thr
-
-    assert best_thr is not None
-    results.sort(key=lambda x: x[0])
-    print("\n[tune] Results (val subset):")
-    for thr, s in results:
         print(
-            f"thr={thr:.2f} mean={s.mean_score:.4f} mean_forged={s.mean_forged:.4f} "
-            f"auth_pred_as_forged={s.auth_pred_as_forged} forg_pred_as_auth={s.forg_pred_as_auth}"
+            f"[tune:grid] split={TUNE_SPLIT} val_fraction={TUNE_VAL_FRACTION} "
+            f"n_thresholds={len(thresholds)} use_tta={TUNE_USE_TTA} batch={TUNE_BATCH}"
         )
 
-    best_summary = dict(results)[best_thr]
-    best_overrides = list(base_overrides) + [f"inference.postprocess.prob_threshold={best_thr}"]
-    print(
-        f"\n[tune] BEST thr={best_thr:.2f} mean={best_summary.mean_score:.4f} "
-        f"mean_forged={best_summary.mean_forged:.4f}"
-    )
-    print("[tune] Suggested overrides:")
-    print(json.dumps(best_overrides, indent=2, ensure_ascii=False))
-
-    tuned_path = OUT_DIR / "tuned_postprocess.json"
-    tuned_path.write_text(
-        json.dumps(
-            {
-                "config": str(TUNE_CONFIG),
-                "split": str(TUNE_SPLIT),
-                "val_fraction": float(TUNE_VAL_FRACTION),
-                "seed": int(TUNE_SEED),
-                "limit": int(TUNE_LIMIT),
-                "best_threshold": float(best_thr),
-                "best_summary": best_summary.as_dict(),
-                "overrides": best_overrides,
-            },
-            indent=2,
-            ensure_ascii=False,
+        # Load engine once (model + input_size). Postprocess will be replaced per-threshold.
+        engine = InferenceEngine.from_config(
+            config_path=TUNE_CONFIG,
+            device=device,
+            overrides=base_overrides,
+            path_roots=[OUT_DIR, CODE_ROOT, CONFIG_ROOT],
+            amp=True,
         )
-        + "\n",
-        encoding="utf-8",
-    )
-    print(f"[tune] Wrote {tuned_path}")
 
-    tuned_config_path = None
-    if TUNE_WRITE_TUNED_CONFIG:
+        # Define validation subset (stratified).
+        all_cases = list_cases(data_root, TUNE_SPLIT, include_authentic=True, include_forged=True)
+        labels = np.asarray([1 if c.mask_path is not None else 0 for c in all_cases], dtype=np.int64)
+        split_iter = stratified_splits(
+            labels,
+            folds=1,
+            val_fraction=float(TUNE_VAL_FRACTION),
+            seed=int(TUNE_SEED),
+        )
+        _, _, val_idx = next(iter(split_iter))
+        val_cases = [all_cases[int(i)] for i in val_idx.tolist()]
+        val_cases = _select_stratified_subset(val_cases, seed=int(TUNE_SEED), limit=int(TUNE_LIMIT))
+        n_auth = sum(1 for c in val_cases if c.mask_path is None)
+        n_forg = sum(1 for c in val_cases if c.mask_path is not None)
+        print(f"[tune:grid] val_cases={len(val_cases)} authentic={n_auth} forged={n_forg}")
 
-        def _slug_float(x: float) -> str:
-            s = f"{float(x):.4f}".rstrip("0").rstrip(".")
-            return s.replace(".", "p")
+        # Fixed postprocess (with overrides applied), except prob_threshold.
+        base_post: PostprocessParams = engine.postprocess
 
-        tuned_cfg = load_config_data(TUNE_CONFIG)
-        tuned_cfg = apply_overrides(tuned_cfg, best_overrides)
-        tuned_config_path = OUT_DIR / f"tuned_{Path(TUNE_CONFIG).stem}_thr{_slug_float(best_thr)}.json"
-        tuned_config_path.write_text(json.dumps(tuned_cfg, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-        print(f"[tune] Wrote {tuned_config_path}")
+        # Accumulators per threshold
+        acc: dict[float, dict[str, float | int]] = {
+            thr: {
+                "sum_all": 0.0,
+                "sum_auth": 0.0,
+                "sum_forg": 0.0,
+                "n_all": 0,
+                "n_auth": 0,
+                "n_forg": 0,
+                "auth_pred_as_forged": 0,
+                "forg_pred_as_auth": 0,
+            }
+            for thr in thresholds
+        }
+
+        def _predict_prob_maps_no_tta(images: list[np.ndarray]) -> list[np.ndarray]:
+            from forgeryseg.image import letterbox_reflect, unletterbox
+
+            padded = []
+            metas = []
+            for img in images:
+                pad, meta = letterbox_reflect(img, int(engine.input_size))
+                padded.append(pad)
+                metas.append(meta)
+
+            x = torch.stack(
+                [torch.from_numpy(im).permute(2, 0, 1).contiguous().float() / 255.0 for im in padded],
+                dim=0,
+            ).to(engine.device)
+
+            with torch.no_grad():
+                if engine.amp and engine.device.type == "cuda":
+                    with torch.autocast(device_type="cuda", dtype=torch.float16):
+                        logits = engine.model(x)
+                else:
+                    logits = engine.model(x)
+                prob = torch.sigmoid(logits)[:, 0].float()
+
+            prob_np = prob.detach().cpu().numpy().astype(np.float32)
+            return [unletterbox(prob_np[i], metas[i]).astype(np.float32) for i in range(len(metas))]
+
+        t0 = time.time()
+        bs = int(max(1, TUNE_BATCH))
+        for i in tqdm(range(0, len(val_cases), bs), desc="[tune:grid] infer"):
+            batch_cases = val_cases[i : i + bs]
+            images = [load_rgb(c.image_path) for c in batch_cases]
+
+            if bool(TUNE_USE_TTA):
+                probs = engine._predict_prob_maps_batched(images)
+            else:
+                probs = _predict_prob_maps_no_tta(images)
+
+            for case, prob in zip(batch_cases, probs, strict=True):
+                gt_instances = [] if case.mask_path is None else load_mask_instances(case.mask_path)
+                gt_is_auth = case.mask_path is None
+
+                for thr in thresholds:
+                    post = dataclasses.replace(base_post, prob_threshold=float(thr))
+                    pred_instances = postprocess_prob(prob, post)
+                    pred_is_auth = len(pred_instances) == 0
+
+                    if gt_is_auth:
+                        s = 1.0 if pred_is_auth else 0.0
+                        if not pred_is_auth:
+                            acc[thr]["auth_pred_as_forged"] = int(acc[thr]["auth_pred_as_forged"]) + 1
+                        acc[thr]["sum_auth"] = float(acc[thr]["sum_auth"]) + float(s)
+                        acc[thr]["n_auth"] = int(acc[thr]["n_auth"]) + 1
+                    else:
+                        if pred_is_auth:
+                            acc[thr]["forg_pred_as_auth"] = int(acc[thr]["forg_pred_as_auth"]) + 1
+                            s = 0.0
+                        else:
+                            s = float(of1_score(pred_instances, gt_instances))
+                        acc[thr]["sum_forg"] = float(acc[thr]["sum_forg"]) + float(s)
+                        acc[thr]["n_forg"] = int(acc[thr]["n_forg"]) + 1
+
+                    acc[thr]["sum_all"] = float(acc[thr]["sum_all"]) + float(s)
+                    acc[thr]["n_all"] = int(acc[thr]["n_all"]) + 1
+
+        dt = time.time() - t0
+        print(f"[tune:grid] done in {dt:.1f}s")
+
+        best_thr = None
+        best_score = -math.inf
+        results: list[tuple[float, ScoreSummary]] = []
+        for thr in thresholds:
+            a = acc[thr]
+            n_all = int(a["n_all"])
+            n_auth = int(a["n_auth"])
+            n_forg = int(a["n_forg"])
+            mean_all = float(a["sum_all"]) / max(1, n_all)
+            mean_auth = float(a["sum_auth"]) / max(1, n_auth)
+            mean_forg = float(a["sum_forg"]) / max(1, n_forg)
+            summary = ScoreSummary(
+                mean_score=mean_all,
+                mean_authentic=mean_auth,
+                mean_forged=mean_forg,
+                n_cases=n_all,
+                n_authentic=n_auth,
+                n_forged=n_forg,
+                auth_pred_as_forged=int(a["auth_pred_as_forged"]),
+                forg_pred_as_auth=int(a["forg_pred_as_auth"]),
+                decode_errors_scoring=0,
+            )
+            results.append((thr, summary))
+            if mean_all > best_score:
+                best_score = mean_all
+                best_thr = thr
+
+        assert best_thr is not None
+        results.sort(key=lambda x: x[0])
+        print("\n[tune:grid] Results (val subset):")
+        for thr, s in results:
+            print(
+                f"thr={thr:.2f} mean={s.mean_score:.4f} mean_forged={s.mean_forged:.4f} "
+                f"auth_pred_as_forged={s.auth_pred_as_forged} forg_pred_as_auth={s.forg_pred_as_auth}"
+            )
+
+        best_summary = dict(results)[best_thr]
+        best_overrides = list(base_overrides) + [f"inference.postprocess.prob_threshold={best_thr}"]
+        print(
+            f"\n[tune:grid] BEST thr={best_thr:.2f} mean={best_summary.mean_score:.4f} "
+            f"mean_forged={best_summary.mean_forged:.4f}"
+        )
+        print("[tune:grid] Suggested overrides:")
+        print(json.dumps(best_overrides, indent=2, ensure_ascii=False))
+
+        tuned_path = OUT_DIR / "tuned_postprocess.json"
+        tuned_path.write_text(
+            json.dumps(
+                {
+                    "config": str(TUNE_CONFIG),
+                    "split": str(TUNE_SPLIT),
+                    "val_fraction": float(TUNE_VAL_FRACTION),
+                    "seed": int(TUNE_SEED),
+                    "limit": int(TUNE_LIMIT),
+                    "best_threshold": float(best_thr),
+                    "best_summary": best_summary.as_dict(),
+                    "overrides": best_overrides,
+                },
+                indent=2,
+                ensure_ascii=False,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        print(f"[tune:grid] Wrote {tuned_path}")
+
+        if TUNE_WRITE_TUNED_CONFIG:
+
+            def _slug_float(x: float) -> str:
+                s = f"{float(x):.4f}".rstrip("0").rstrip(".")
+                return s.replace(".", "p")
+
+            tuned_cfg = load_config_data(TUNE_CONFIG)
+            tuned_cfg = apply_overrides(tuned_cfg, best_overrides)
+            tuned_config_path = OUT_DIR / f"tuned_{Path(TUNE_CONFIG).stem}_thr{_slug_float(best_thr)}.json"
+            tuned_config_path.write_text(json.dumps(tuned_cfg, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+            print(f"[tune:grid] Wrote {tuned_config_path}")
 
 # %%
 # -------------------------

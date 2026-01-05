@@ -72,6 +72,16 @@ class DinoV2FreqFusionSegmentationModel(nn.Module):
             dropout=decoder_dropout,
         )
 
+        # Same input normalization as DINOv2 models in timm (mean/std on [0,1] inputs).
+        cfg = getattr(self.encoder, "default_cfg", {}) or {}
+        mean = tuple(cfg.get("mean", (0.485, 0.456, 0.406)))
+        std = tuple(cfg.get("std", (0.229, 0.224, 0.225)))
+        if len(mean) != 3 or len(std) != 3:
+            mean = (0.485, 0.456, 0.406)
+            std = (0.229, 0.224, 0.225)
+        self.register_buffer("_in_mean", torch.tensor(mean, dtype=torch.float32).view(1, 3, 1, 1))
+        self.register_buffer("_in_std", torch.tensor(std, dtype=torch.float32).view(1, 3, 1, 1))
+
         if freeze_encoder:
             for p in self.encoder.parameters():
                 p.requires_grad = False
@@ -108,6 +118,11 @@ class DinoV2FreqFusionSegmentationModel(nn.Module):
         if x.ndim != 4 or x.shape[1] != 3:
             raise ValueError(f"Expected input (B, 3, H, W), got shape={tuple(x.shape)}")
         return (0.2989 * x[:, 0] + 0.5870 * x[:, 1] + 0.1140 * x[:, 2]).contiguous()
+
+    def _normalize_input(self, x: torch.Tensor) -> torch.Tensor:
+        mean = self._in_mean.to(device=x.device, dtype=x.dtype)
+        std = self._in_std.to(device=x.device, dtype=x.dtype)
+        return (x - mean) / (std + 1e-6)
 
     def _extract_freq(self, x: torch.Tensor) -> torch.Tensor:
         gray = self._to_gray(x)
@@ -148,7 +163,7 @@ class DinoV2FreqFusionSegmentationModel(nn.Module):
         return feat
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        tokens = self.encoder.forward_features(x)  # (B, 1 + (reg) + HW, C)
+        tokens = self.encoder.forward_features(self._normalize_input(x))  # (B, 1 + (reg) + HW, C)
         if tokens.ndim != 3 or tokens.shape[1] < 2:
             raise RuntimeError(f"Unexpected encoder output shape: {tokens.shape}")
 

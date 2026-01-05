@@ -46,6 +46,11 @@ python scripts/predict_submission.py --config configs/dino_v3_518_r69_fft_gate.j
 - Documentação/atalhos: `docs/CONFIG.md`, `docs/KAGGLE.md`, `Makefile` e `requirements-kaggle.txt` (pinagem para reproduzir ambiente).
 - Qualidade: mais testes unitários (dataset, postprocess, FFT gate, Trainer checkpoint), CI e `pre-commit`.
 
+## Atualizações (2026-01-05)
+
+- Normalização correta do DINOv2 (mean/std do `timm`) embutida nos modelos (melhora convergence/underfit).
+- Tuning bayesiano do pós-processo: `scripts/optuna_tune_postprocess.py` (cache de prob_maps + Optuna) e integração no `notebooks/fase_01_treino_kaggle.ipynb`.
+
 ## Citação
 
 Para citar este repositório em um paper, use `CITATION.bib`.

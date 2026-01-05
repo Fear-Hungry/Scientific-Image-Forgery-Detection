@@ -41,6 +41,17 @@ Use o script abaixo para gerar submissões no `train/supplemental` e escolher o 
 
 > Dica: `--limit` ajuda a iterar rápido (subconjunto), mas o melhor threshold final deve ser validado no split completo.
 
+### 2.3 Otimização bayesiana (Optuna) do pós-processo (recomendado)
+
+Quando você quer ir além do sweep de threshold, use Optuna para ajustar vários campos de `inference.postprocess.*` em cima de um **cache** de `prob_maps` (inferência roda 1x; trials são rápidos):
+
+- `python scripts/optuna_tune_postprocess.py --config configs/dino_v3_518_r69_fft_gate.json --data-root data/recodai --split train --out-dir outputs/optuna --val-fraction 0.10 --trials 200 --objective mean_score --set inference.fft_gate.enabled=false`
+
+Saídas importantes:
+
+- `outputs/optuna/optuna_best.json`: melhor score e overrides.
+- `outputs/optuna/tuned_<config>_optuna_mean_score.json`: config pronta para usar na submissão.
+
 ## 3) Criar e combinar submissões (ensemble)
 
 ### 3.1 Gerar múltiplas submissões

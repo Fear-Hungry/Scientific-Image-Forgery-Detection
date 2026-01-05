@@ -102,7 +102,7 @@ def resolve_config_path(path: Pathish, *, config_path: Pathish, roots: Iterable[
 # Segmentation config schema
 # ------------------------
 
-SegModelType = Literal["dinov2", "dinov2_freq_fusion"]
+SegModelType = Literal["dinov2", "dinov2_freq_fusion", "dinov2_multiscale"]
 AugMode = Literal["none", "basic", "robust"]
 SchedulerMode = Literal["none", "cosine", "onecycle"]
 
@@ -133,6 +133,7 @@ class SegmentationModelConfig:
     decoder_dropout: float = 0.0
     freeze_encoder: bool = True
     freq_fusion: dict[str, Any] = field(default_factory=dict)
+    multiscale: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
     def from_dict(cls, d: dict[str, Any] | None) -> SegmentationModelConfig:
@@ -147,11 +148,12 @@ class SegmentationModelConfig:
             decoder_dropout=float(d.get("decoder_dropout", cls.decoder_dropout)),
             freeze_encoder=bool(d.get("freeze_encoder", cls.freeze_encoder)),
             freq_fusion=dict(d.get("freq_fusion", {})) if isinstance(d.get("freq_fusion", {}), dict) else {},
+            multiscale=dict(d.get("multiscale", {})) if isinstance(d.get("multiscale", {}), dict) else {},
         )
 
     def validate(self) -> None:
-        if str(self.type) not in {"dinov2", "dinov2_freq_fusion"}:
-            raise ValueError("model.type must be one of: dinov2, dinov2_freq_fusion")
+        if str(self.type) not in {"dinov2", "dinov2_freq_fusion", "dinov2_multiscale"}:
+            raise ValueError("model.type must be one of: dinov2, dinov2_freq_fusion, dinov2_multiscale")
         if int(self.input_size) <= 0:
             raise ValueError("model.input_size must be > 0")
         if int(self.decoder_hidden_channels) <= 0:
@@ -353,15 +355,16 @@ class SegmentationExperimentConfig:
                     "input_size": d.get("input_size"),
                     "encoder": d.get("encoder"),
                     "checkpoint": d.get("checkpoint"),
-                    "decoder_hidden_channels": d.get("decoder_hidden_channels"),
-                    "decoder_dropout": d.get("decoder_dropout"),
-                    "freeze_encoder": d.get("freeze_encoder"),
-                    "freq_fusion": d.get("freq_fusion"),
-                },
-                "inference": {
-                    "tta": d.get("tta"),
-                    "tiling": d.get("tiling"),
-                    "postprocess": d.get("postprocess"),
+                "decoder_hidden_channels": d.get("decoder_hidden_channels"),
+                "decoder_dropout": d.get("decoder_dropout"),
+                "freeze_encoder": d.get("freeze_encoder"),
+                "freq_fusion": d.get("freq_fusion"),
+                "multiscale": d.get("multiscale"),
+            },
+            "inference": {
+                "tta": d.get("tta"),
+                "tiling": d.get("tiling"),
+                "postprocess": d.get("postprocess"),
                     "fft_gate": d.get("fft_gate"),
                 },
                 "train": d.get("train"),

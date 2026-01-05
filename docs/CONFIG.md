@@ -32,7 +32,8 @@ Usada por:
     "decoder_hidden_channels": 256,
     "decoder_dropout": 0.0,
     "freeze_encoder": true,
-    "freq_fusion": {}
+    "freq_fusion": {},
+    "multiscale": {}
   },
   "inference": {
     "batch_size": 1,
@@ -57,10 +58,11 @@ Usada por:
 
 ### Campos principais
 
-- `model.type`: `"dinov2"` ou `"dinov2_freq_fusion"`
+- `model.type`: `"dinov2"`, `"dinov2_freq_fusion"` ou `"dinov2_multiscale"`
 - `model.input_size`: tamanho do *letterbox* (usado em treino e inferência)
 - `model.checkpoint`: checkpoint do modelo completo (usado na inferência)
 - `model.encoder.*`: especificação do encoder DINOv2 (timm)
+- `model.multiscale.*`: extração multi-camada (somente em `dinov2_multiscale`)
 - `inference.tta.*`: TTA (por padrão: identidade + flip + zoom-out)
 - `inference.batch_size`: batch de imagens (quando `tiling` está desligado)
 - `inference.tiling.*`: *tiled inference* (opcional; use quando imagem é grande)
@@ -89,6 +91,13 @@ Observações:
 
 - `authentic_*` é útil para reduzir falsos positivos pequenos/baixos; combine com `min_area`.
 - Com `fft_gate` ligado, casos previstos como `authentic` podem ser reavaliados com heurísticas menos agressivas.
+
+### `model.multiscale` (somente `dinov2_multiscale`)
+
+- `layers`: camadas do ViT para extrair features (aceita `[2,5,8,11]` ou `[3,6,9,12]` no modelo base).
+- `proj_channels`: canais após projeção 1×1 por camada (antes da fusão).
+- `fuse`: `"concat"` (padrão) ou `"sum"`.
+- `decoder_depth`: profundidade do head CNN após fusão (>= 1).
 
 ## 2) Config do classificador FFT
 

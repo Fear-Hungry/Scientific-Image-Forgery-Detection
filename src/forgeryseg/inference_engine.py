@@ -15,6 +15,7 @@ from .image import LetterboxMeta, letterbox_reflect, unletterbox
 from .inference import TilingParams, default_tta, load_rgb, predict_prob_map_tiled
 from .models.dinov2_decoder import DinoV2EncoderSpec, DinoV2SegmentationModel
 from .models.dinov2_freq_fusion import DinoV2FreqFusionSegmentationModel, FreqFusionSpec
+from .models.dinov2_multiscale import DinoV2MultiScaleSegmentationModel, MultiScaleSpec
 from .paths import resolve_existing_path
 from .postprocess import PostprocessParams, postprocess_prob
 from .rle import masks_to_annotation
@@ -49,6 +50,15 @@ def _load_segmentation_model(
             decoder_dropout=float(cfg.decoder_dropout),
             freeze_encoder=bool(cfg.freeze_encoder),
             freq=freq,
+        )
+    elif cfg.type == "dinov2_multiscale":
+        multiscale = MultiScaleSpec(**cfg.multiscale)
+        model = DinoV2MultiScaleSegmentationModel(
+            encoder,
+            decoder_hidden_channels=int(cfg.decoder_hidden_channels),
+            decoder_dropout=float(cfg.decoder_dropout),
+            freeze_encoder=bool(cfg.freeze_encoder),
+            multiscale=multiscale,
         )
     else:
         model = DinoV2SegmentationModel(

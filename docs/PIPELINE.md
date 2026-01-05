@@ -58,3 +58,8 @@ Modelo `dinov2_freq_fusion` extrai uma representação FFT no `forward()` e faz 
 
 Modos suportados em `freq_fusion.mode`: `logmag`, `hp_residual`, `phase_only`, `lp_hp`.
 
+## 6) Extração multi-escala (opcional)
+
+Modelo `dinov2_multiscale` extrai hidden states de múltiplas camadas do ViT (ex.: 3/6/9/12), projeta para o mesmo número de canais e faz fusão antes do decoder.
+
+- `python scripts/predict_submission.py --config configs/dino_v4_518_r69_multiscale.json --data-root data/recodai --split test --out outputs/submission_multiscale.csv`

@@ -15,6 +15,7 @@ from ..dataset import RecodaiDataset
 from ..losses import bce_dice_loss
 from ..models.dinov2_decoder import DinoV2EncoderSpec, DinoV2SegmentationModel
 from ..models.dinov2_freq_fusion import DinoV2FreqFusionSegmentationModel, FreqFusionSpec
+from ..models.dinov2_multiscale import DinoV2MultiScaleSegmentationModel, MultiScaleSpec
 from ..paths import resolve_existing_path
 from ..postprocess import PostprocessParams
 from ..typing import Case, Pathish, Split
@@ -91,6 +92,15 @@ def _build_model(cfg: SegmentationExperimentConfig) -> torch.nn.Module:
             decoder_dropout=float(cfg.model.decoder_dropout),
             freeze_encoder=bool(cfg.model.freeze_encoder),
             freq=freq,
+        )
+    if cfg.model.type == "dinov2_multiscale":
+        multiscale = MultiScaleSpec(**cfg.model.multiscale)
+        return DinoV2MultiScaleSegmentationModel(
+            encoder,
+            decoder_hidden_channels=int(cfg.model.decoder_hidden_channels),
+            decoder_dropout=float(cfg.model.decoder_dropout),
+            freeze_encoder=bool(cfg.model.freeze_encoder),
+            multiscale=multiscale,
         )
     return DinoV2SegmentationModel(
         encoder,

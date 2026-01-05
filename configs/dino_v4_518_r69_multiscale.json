@@ -1,0 +1,59 @@
+{
+  "name": "v4_r69_518_multiscale",
+  "model": {
+    "type": "dinov2_multiscale",
+    "input_size": 518,
+    "encoder": {
+      "model_name": "vit_base_patch14_reg4_dinov2",
+      "checkpoint_path": null,
+      "pretrained": true
+    },
+    "checkpoint": "outputs/models/r69_ms.pth",
+    "decoder_hidden_channels": 256,
+    "decoder_dropout": 0.0,
+    "freeze_encoder": true,
+    "multiscale": {
+      "layers": [3, 6, 9, 12],
+      "proj_channels": 256,
+      "fuse": "concat",
+      "decoder_depth": 4
+    }
+  },
+  "inference": {
+    "tta": {
+      "zoom_scale": 0.9,
+      "weights": [0.6, 0.2, 0.2]
+    },
+    "postprocess": {
+      "prob_threshold": 0.5,
+      "gaussian_sigma": 0.75,
+      "sobel_weight": 0.1,
+      "open_kernel": 3,
+      "close_kernel": 5,
+      "min_area": 150,
+      "min_mean_conf": 0.18,
+      "min_prob_std": 0.25,
+      "small_area": 300,
+      "small_min_mean_conf": 0.85,
+      "authentic_area_max": 300,
+      "authentic_conf_max": 0.85
+    }
+  },
+  "train": {
+    "epochs": 5,
+    "batch_size": 4,
+    "lr": 0.001,
+    "weight_decay": 0.0001,
+    "num_workers": 2,
+    "val_fraction": 0.1,
+    "seed": 42,
+    "folds": 1,
+    "fold": -1,
+    "aug": "basic",
+    "scheduler": "none",
+    "lr_min": 1e-6,
+    "max_lr": 0.0,
+    "pct_start": 0.1
+  }
+}
+

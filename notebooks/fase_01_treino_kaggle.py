@@ -108,9 +108,13 @@ SEG_BATCH = 4
 SEG_LR = 1e-3
 SEG_WD = 1e-4
 SEG_NUM_WORKERS = 2
-SEG_AUG = "robust"  # none | basic | robust
+SEG_AUG = "robust"  # none | basic | robust (inclui rot90 + JPEG artifacts)
 SEG_SCHEDULER = "cosine"  # none | cosine | onecycle
 SEG_PATIENCE = 3  # early stopping em val_of1 (0 desliga)
+
+# CutMix (opcional, treino de segmentação)
+SEG_CUTMIX_PROB = 0.0  # 0 desliga; 0.3–0.7 costuma ser um bom range
+SEG_CUTMIX_ALPHA = 1.0
 
 FFT_EPOCHS = 5
 FFT_BATCH = 32
@@ -129,6 +133,7 @@ FFT_OUT = OUT_MODELS / "fft_cls.pth"
 EVAL_AFTER_TRAIN = True
 EVAL_SPLIT = "train"  # train | supplemental
 EVAL_LIMIT = 0  # 0 = sem limite (usa tudo)
+EVAL_CONFIG = CONFIG_ROOT / "dino_v3_518_r69_fft_gate_tta_plus.json"  # TTA mais forte (h/vflip + zoom in/out)
 
 # (Opcional) tunar pós-processamento (rápido) num subset de validação.
 #
@@ -137,7 +142,7 @@ EVAL_LIMIT = 0  # 0 = sem limite (usa tudo)
 # Observação: este sweep roda por padrão em um subset (val_fraction) para ser viável no Kaggle.
 TUNE_POSTPROCESS = True
 TUNE_METHOD = "optuna"  # "optuna" (melhor) | "grid" (fallback sem Optuna)
-TUNE_CONFIG = CONFIG_ROOT / "dino_v3_518_r69_fft_gate.json"
+TUNE_CONFIG = EVAL_CONFIG
 TUNE_SPLIT = EVAL_SPLIT
 TUNE_VAL_FRACTION = 0.10
 TUNE_SEED = 42
@@ -211,12 +216,21 @@ OUT_MODELS.mkdir(parents=True, exist_ok=True)
 
 seg_result = None
 if TRAIN_SEG:
+    seg_overrides: list[str] = []
+    if float(SEG_CUTMIX_PROB) > 0:
+        seg_overrides.extend(
+            [
+                f"train.cutmix_prob={float(SEG_CUTMIX_PROB)}",
+                f"train.cutmix_alpha={float(SEG_CUTMIX_ALPHA)}",
+            ]
+        )
     seg_result = train_dino_decoder(
         config_path=SEG_TRAIN_CONFIG,
         data_root=data_root,
         out_path=SEG_OUT,
         device=device_str,
         split="train",
+        overrides=seg_overrides if seg_overrides else None,
         epochs=int(SEG_EPOCHS),
         batch_size=int(SEG_BATCH),
         lr=float(SEG_LR),
@@ -280,11 +294,10 @@ if TRAIN_FFT:
 if EVAL_AFTER_TRAIN:
     from forgeryseg.eval import score_submission_csv, validate_submission_format
 
-    eval_cfg = CONFIG_ROOT / "dino_v3_518_r69_fft_gate.json"
     eval_csv = OUT_DIR / f"submission_{EVAL_SPLIT}.csv"
 
     stats = write_submission_csv(
-        config_path=eval_cfg,
+        config_path=EVAL_CONFIG,
         data_root=data_root,
         split=EVAL_SPLIT,  # type: ignore[arg-type]
         out_path=eval_csv,

@@ -75,10 +75,15 @@ Usada por:
 Campos (ver também `src/forgeryseg/postprocess.py`):
 
 - `prob_threshold`: threshold principal (pixel) para binarizar o `prob_map`.
+- `prob_threshold_low`: threshold “baixo” opcional (hysteresis). Se setado (`< prob_threshold`), mantém regiões `>= prob_threshold_low` **apenas** quando conectadas a seeds `>= prob_threshold`.
 - `gaussian_sigma`: suavização do `prob_map` via Gaussian blur (0 desliga).
 - `sobel_weight`: reforço de borda via Sobel no `prob_map` (0 desliga).
 - `open_kernel`: abertura morfológica (remove ruído); `<=1` desliga.
 - `close_kernel`: fechamento morfológico (fecha buracos); `<=1` desliga.
+- `morph_order`: ordem da morfologia: `"open_close"` (padrão) ou `"close_open"`.
+- `final_open_kernel`: abertura morfológica **final** (2ª passada, opcional); `<=1` desliga.
+- `final_close_kernel`: fechamento morfológico **final** (2ª passada, opcional); `<=1` desliga.
+- `fill_holes`: preenche buracos internos da máscara união (útil para contornos mais suaves).
 - `min_area`: remove componentes com área menor que este valor.
 - `min_mean_conf`: exige `mean(prob)` da máscara união acima deste valor.
 - `min_prob_std`: se `std(prob_map)` for menor que este valor, retorna `authentic` (útil para “mapa flat”).

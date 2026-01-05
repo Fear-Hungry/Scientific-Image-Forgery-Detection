@@ -51,6 +51,7 @@ python scripts/predict_submission.py --config configs/dino_v3_518_r69_fft_gate.j
 - Normalização correta do DINOv2 (mean/std do `timm`) embutida nos modelos (melhora convergence/underfit).
 - Tuning bayesiano do pós-processo: `scripts/optuna_tune_postprocess.py` (cache de prob_maps + Optuna) e integração no `notebooks/fase_01_treino_kaggle.ipynb`.
 - Modelo multi-escala (features de múltiplas camadas do ViT): `model.type=dinov2_multiscale` + exemplo em `configs/dino_v4_518_r69_multiscale.json`.
+- Pós-processamento refinado: hysteresis (`prob_threshold_low`), ordem/2ª passada de morfologia (`morph_order`, `final_*_kernel`) e `fill_holes` (e Optuna atualizado para tunar isso).
 
 ## Citação
 

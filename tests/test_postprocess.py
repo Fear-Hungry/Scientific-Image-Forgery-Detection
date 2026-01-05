@@ -50,3 +50,31 @@ def test_postprocess_min_prob_std_returns_empty_for_flat_maps() -> None:
     prob = np.full((8, 8), 0.2, dtype=np.float32)
     params = PostprocessParams(prob_threshold=0.1, min_prob_std=0.01)
     assert postprocess_prob(prob, params) == []
+
+
+def test_postprocess_hysteresis_keeps_low_connected_to_high() -> None:
+    prob = np.zeros((7, 7), dtype=np.float32)
+    prob[2:5, 2:5] = 0.4  # low region
+    prob[3, 3] = 0.6  # high seed inside
+    prob[0, 0] = 0.4  # disconnected low region (should be removed)
+
+    params = PostprocessParams(prob_threshold=0.5, prob_threshold_low=0.3)
+    instances = postprocess_prob(prob, params)
+    assert len(instances) == 1
+    assert int(instances[0].sum()) == 9  # only the 3x3 region connected to the high seed
+
+
+def test_postprocess_fill_holes_fills_center() -> None:
+    prob = np.zeros((3, 3), dtype=np.float32)
+    prob[:, :] = 0.9
+    prob[1, 1] = 0.0  # hole
+
+    params_no_fill = PostprocessParams(prob_threshold=0.5, fill_holes=False)
+    inst0 = postprocess_prob(prob, params_no_fill)
+    assert len(inst0) == 1
+    assert int(inst0[0].sum()) == 8
+
+    params_fill = PostprocessParams(prob_threshold=0.5, fill_holes=True)
+    inst1 = postprocess_prob(prob, params_fill)
+    assert len(inst1) == 1
+    assert int(inst1[0].sum()) == 9

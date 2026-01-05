@@ -327,10 +327,27 @@ def tune_postprocess_optuna(
 
     def _objective(trial) -> float:
         prob_threshold = trial.suggest_float("prob_threshold", 0.20, 0.60)
+        use_hysteresis = trial.suggest_categorical("use_hysteresis", [False, True])
+        hysteresis_delta = (
+            trial.suggest_float("hysteresis_delta", 0.05, 0.25) if bool(use_hysteresis) else None
+        )
+        prob_threshold_low = (
+            max(0.0, float(prob_threshold) - float(hysteresis_delta)) if hysteresis_delta is not None else None
+        )
+
         gaussian_sigma = trial.suggest_float("gaussian_sigma", 0.0, 1.5)
         sobel_weight = trial.suggest_float("sobel_weight", 0.0, 0.25)
         open_kernel = trial.suggest_categorical("open_kernel", [0, 3, 5, 7])
         close_kernel = trial.suggest_categorical("close_kernel", [0, 3, 5, 7, 9, 11])
+        morph_order = trial.suggest_categorical("morph_order", ["open_close", "close_open"])
+        use_final_morph = trial.suggest_categorical("use_final_morph", [False, True])
+        final_open_kernel = (
+            trial.suggest_categorical("final_open_kernel", [0, 3, 5]) if bool(use_final_morph) else 0
+        )
+        final_close_kernel = (
+            trial.suggest_categorical("final_close_kernel", [0, 3, 5, 7]) if bool(use_final_morph) else 0
+        )
+        fill_holes = trial.suggest_categorical("fill_holes", [False, True])
         min_area = trial.suggest_int("min_area", 0, 400, step=8)
         min_mean_conf = trial.suggest_float("min_mean_conf", 0.0, 0.35)
         min_prob_std = trial.suggest_float("min_prob_std", 0.0, 0.35)
@@ -345,10 +362,15 @@ def tune_postprocess_optuna(
 
         post = PostprocessParams(
             prob_threshold=float(prob_threshold),
+            prob_threshold_low=None if prob_threshold_low is None else float(prob_threshold_low),
             gaussian_sigma=float(gaussian_sigma),
             sobel_weight=float(sobel_weight),
             open_kernel=int(open_kernel),
             close_kernel=int(close_kernel),
+            morph_order=str(morph_order),  # type: ignore[arg-type]
+            final_open_kernel=int(final_open_kernel),
+            final_close_kernel=int(final_close_kernel),
+            fill_holes=bool(fill_holes),
             min_area=int(min_area),
             min_mean_conf=float(min_mean_conf),
             min_prob_std=float(min_prob_std),
@@ -415,10 +437,27 @@ def tune_postprocess_optuna(
     best_params = dict(study.best_params)
     best_post = PostprocessParams(
         prob_threshold=float(best_params["prob_threshold"]),
+        prob_threshold_low=(
+            max(0.0, float(best_params["prob_threshold"]) - float(best_params["hysteresis_delta"]))
+            if bool(best_params.get("use_hysteresis")) and best_params.get("hysteresis_delta") is not None
+            else None
+        ),
         gaussian_sigma=float(best_params["gaussian_sigma"]),
         sobel_weight=float(best_params["sobel_weight"]),
         open_kernel=int(best_params["open_kernel"]),
         close_kernel=int(best_params["close_kernel"]),
+        morph_order=str(best_params.get("morph_order", "open_close")),  # type: ignore[arg-type]
+        final_open_kernel=(
+            int(best_params["final_open_kernel"])
+            if bool(best_params.get("use_final_morph")) and best_params.get("final_open_kernel") is not None
+            else 0
+        ),
+        final_close_kernel=(
+            int(best_params["final_close_kernel"])
+            if bool(best_params.get("use_final_morph")) and best_params.get("final_close_kernel") is not None
+            else 0
+        ),
+        fill_holes=bool(best_params.get("fill_holes", False)),
         min_area=int(best_params["min_area"]),
         min_mean_conf=float(best_params["min_mean_conf"]),
         min_prob_std=float(best_params["min_prob_std"]),
@@ -459,10 +498,15 @@ def tune_postprocess_optuna(
     best_overrides.extend(
         [
             _ov("inference.postprocess.prob_threshold", best_post.prob_threshold),
+            _ov("inference.postprocess.prob_threshold_low", best_post.prob_threshold_low),
             _ov("inference.postprocess.gaussian_sigma", best_post.gaussian_sigma),
             _ov("inference.postprocess.sobel_weight", best_post.sobel_weight),
             _ov("inference.postprocess.open_kernel", best_post.open_kernel),
             _ov("inference.postprocess.close_kernel", best_post.close_kernel),
+            _ov("inference.postprocess.morph_order", best_post.morph_order),
+            _ov("inference.postprocess.final_open_kernel", best_post.final_open_kernel),
+            _ov("inference.postprocess.final_close_kernel", best_post.final_close_kernel),
+            _ov("inference.postprocess.fill_holes", best_post.fill_holes),
             _ov("inference.postprocess.min_area", best_post.min_area),
             _ov("inference.postprocess.min_mean_conf", best_post.min_mean_conf),
             _ov("inference.postprocess.min_prob_std", best_post.min_prob_std),

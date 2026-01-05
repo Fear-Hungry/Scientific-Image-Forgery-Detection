@@ -1,19 +1,28 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Literal
 
 import cv2
 import numpy as np
+
+MorphOrder = Literal["open_close", "close_open"]
 
 
 @dataclass(frozen=True)
 class PostprocessParams:
     prob_threshold: float = 0.5
+    prob_threshold_low: float | None = None
     gaussian_sigma: float = 0.0
     sobel_weight: float = 0.0
 
     open_kernel: int = 0
     close_kernel: int = 0
+    morph_order: MorphOrder = "open_close"
+
+    final_open_kernel: int = 0
+    final_close_kernel: int = 0
+    fill_holes: bool = False
 
     min_area: int = 0
     min_mean_conf: float = 0.0
@@ -31,6 +40,52 @@ def _kernel(k: int) -> np.ndarray:
     if k <= 1:
         return np.ones((1, 1), dtype=np.uint8)
     return cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k))
+
+
+def _apply_morph(mask: np.ndarray, *, open_kernel: int, close_kernel: int, order: MorphOrder) -> np.ndarray:
+    """
+    Apply opening/closing in a configurable order.
+    """
+    mask = mask.astype(np.uint8)
+    open_kernel = int(open_kernel)
+    close_kernel = int(close_kernel)
+
+    def _open(x: np.ndarray) -> np.ndarray:
+        if open_kernel > 1:
+            return cv2.morphologyEx(x, cv2.MORPH_OPEN, _kernel(open_kernel))
+        return x
+
+    def _close(x: np.ndarray) -> np.ndarray:
+        if close_kernel > 1:
+            return cv2.morphologyEx(x, cv2.MORPH_CLOSE, _kernel(close_kernel))
+        return x
+
+    if order == "open_close":
+        return _close(_open(mask))
+    if order == "close_open":
+        return _open(_close(mask))
+    raise ValueError(f"Unknown morph_order: {order}")
+
+
+def _fill_holes(mask: np.ndarray) -> np.ndarray:
+    """
+    Fill internal holes of a binary mask (uint8 0/1).
+
+    Uses flood-fill on the inverted padded mask to identify holes.
+    """
+    mask_u8 = (mask > 0).astype(np.uint8)
+    if mask_u8.ndim != 2:
+        raise ValueError(f"Expected 2D mask, got shape={mask_u8.shape}")
+
+    padded = np.pad(mask_u8, 1, mode="constant", constant_values=0)
+    inv = (1 - padded).astype(np.uint8)
+    flood = inv.copy()
+    h, w = flood.shape[:2]
+    ff_mask = np.zeros((h + 2, w + 2), dtype=np.uint8)
+    cv2.floodFill(flood, ff_mask, seedPoint=(0, 0), newVal=0)
+    holes = flood
+    filled = np.clip(padded + holes, 0, 1).astype(np.uint8)
+    return filled[1:-1, 1:-1]
 
 
 def _connected_components(mask: np.ndarray) -> list[tuple[np.ndarray, int]]:
@@ -64,12 +119,25 @@ def postprocess_prob(
     if params.min_prob_std and float(prob.std()) < float(params.min_prob_std):
         return []
 
-    mask = (prob >= float(params.prob_threshold)).astype(np.uint8)
+    thr_high = float(params.prob_threshold)
+    thr_low = params.prob_threshold_low
 
-    if params.open_kernel and params.open_kernel > 1:
-        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, _kernel(params.open_kernel))
-    if params.close_kernel and params.close_kernel > 1:
-        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, _kernel(params.close_kernel))
+    if thr_low is not None and float(thr_low) > 0 and float(thr_low) < float(thr_high):
+        mask_high = (prob >= float(thr_high)).astype(np.uint8)
+        if int(mask_high.sum()) == 0:
+            return []
+        mask_low = (prob >= float(thr_low)).astype(np.uint8)
+        kept_low: list[np.ndarray] = []
+        for comp_mask, _area in _connected_components(mask_low):
+            if np.any(mask_high[comp_mask.astype(bool)]):
+                kept_low.append(comp_mask)
+        if not kept_low:
+            return []
+        mask = np.clip(np.sum(np.stack(kept_low, axis=0), axis=0), 0, 1).astype(np.uint8)
+    else:
+        mask = (prob >= float(thr_high)).astype(np.uint8)
+
+    mask = _apply_morph(mask, open_kernel=int(params.open_kernel), close_kernel=int(params.close_kernel), order=params.morph_order)
 
     kept: list[np.ndarray] = []
     for comp_mask, area in _connected_components(mask):
@@ -86,6 +154,17 @@ def postprocess_prob(
         return []
 
     union = np.clip(np.sum(np.stack(kept, axis=0), axis=0), 0, 1).astype(np.uint8)
+
+    if params.final_open_kernel > 1 or params.final_close_kernel > 1:
+        union = _apply_morph(
+            union,
+            open_kernel=int(params.final_open_kernel),
+            close_kernel=int(params.final_close_kernel),
+            order=params.morph_order,
+        )
+    if params.fill_holes:
+        union = _fill_holes(union)
+
     union_area = int(union.sum())
     union_mean = float(prob[union.astype(bool)].mean()) if union_area > 0 else 0.0
 

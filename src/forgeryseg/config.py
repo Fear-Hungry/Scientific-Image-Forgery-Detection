@@ -196,10 +196,15 @@ class TilingConfig:
 @dataclass
 class PostprocessConfig:
     prob_threshold: float = 0.5
+    prob_threshold_low: float | None = None
     gaussian_sigma: float = 0.0
     sobel_weight: float = 0.0
+    morph_order: str = "open_close"
     open_kernel: int = 0
     close_kernel: int = 0
+    final_open_kernel: int = 0
+    final_close_kernel: int = 0
+    fill_holes: bool = False
     min_area: int = 0
     min_mean_conf: float = 0.0
     min_prob_std: float = 0.0
@@ -213,10 +218,17 @@ class PostprocessConfig:
         d = d or {}
         return cls(
             prob_threshold=float(d.get("prob_threshold", cls.prob_threshold)),
+            prob_threshold_low=None
+            if d.get("prob_threshold_low") is None
+            else float(d.get("prob_threshold_low")),
             gaussian_sigma=float(d.get("gaussian_sigma", cls.gaussian_sigma)),
             sobel_weight=float(d.get("sobel_weight", cls.sobel_weight)),
+            morph_order=str(d.get("morph_order", cls.morph_order)),
             open_kernel=int(d.get("open_kernel", cls.open_kernel)),
             close_kernel=int(d.get("close_kernel", cls.close_kernel)),
+            final_open_kernel=int(d.get("final_open_kernel", cls.final_open_kernel)),
+            final_close_kernel=int(d.get("final_close_kernel", cls.final_close_kernel)),
+            fill_holes=bool(d.get("fill_holes", cls.fill_holes)),
             min_area=int(d.get("min_area", cls.min_area)),
             min_mean_conf=float(d.get("min_mean_conf", cls.min_mean_conf)),
             min_prob_std=float(d.get("min_prob_std", cls.min_prob_std)),

@@ -11,6 +11,7 @@ Pré-requisitos:
 
 - Gerar submissão individual:
   - `python scripts/predict_submission.py --config configs/dino_v3_518_r69.json --data-root data/recodai --split test --out outputs/submission.csv`
+  - (TTA mais forte) `python scripts/predict_submission.py --config configs/dino_v3_518_r69_fft_gate_tta_plus.json --data-root data/recodai --split test --out outputs/submission_tta_plus.csv`
 
 Sanity-check do CSV:
 

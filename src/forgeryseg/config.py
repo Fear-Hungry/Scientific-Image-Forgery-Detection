@@ -162,17 +162,24 @@ class SegmentationModelConfig:
 
 @dataclass
 class TTAConfig:
+    modes: list[str] | None = None
     zoom_scale: float = 0.9
+    zoom_in_scale: float = 1.1
     weights: list[float] = field(default_factory=lambda: [0.5, 0.25, 0.25])
 
     @classmethod
     def from_dict(cls, d: dict[str, Any] | None) -> TTAConfig:
         d = d or {}
+        modes = d.get("modes", None)
+        if modes is not None and not isinstance(modes, list):
+            modes = list(modes)  # type: ignore[arg-type]
         weights = d.get("weights", cls().weights)
         if not isinstance(weights, list):
             weights = list(weights)  # type: ignore[arg-type]
         return cls(
+            modes=None if modes is None else [str(x) for x in modes],
             zoom_scale=float(d.get("zoom_scale", cls.zoom_scale)),
+            zoom_in_scale=float(d.get("zoom_in_scale", cls.zoom_in_scale)),
             weights=[float(x) for x in weights],
         )
 
@@ -319,6 +326,8 @@ class SegmentationTrainConfig:
     folds: int = 1
     fold: int = -1
     aug: AugMode = "basic"
+    cutmix_prob: float = 0.0
+    cutmix_alpha: float = 1.0
     scheduler: SchedulerMode = "none"
     lr_min: float = 1e-6
     max_lr: float = 0.0
@@ -340,6 +349,8 @@ class SegmentationTrainConfig:
             folds=int(d.get("folds", cls.folds)),
             fold=int(d.get("fold", cls.fold)),
             aug=str(d.get("aug", cls.aug)),
+            cutmix_prob=float(d.get("cutmix_prob", cls.cutmix_prob)),
+            cutmix_alpha=float(d.get("cutmix_alpha", cls.cutmix_alpha)),
             scheduler=str(d.get("scheduler", cls.scheduler)),
             lr_min=float(d.get("lr_min", cls.lr_min)),
             max_lr=float(d.get("max_lr", cls.max_lr)),

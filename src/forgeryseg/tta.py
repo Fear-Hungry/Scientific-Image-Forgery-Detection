@@ -35,6 +35,29 @@ class HFlipTTA(TTATransform):
 
 
 @dataclass(frozen=True)
+class VFlipTTA(TTATransform):
+    dim: int = -2  # height
+
+    def apply(self, x: torch.Tensor) -> torch.Tensor:
+        return torch.flip(x, dims=(self.dim,))
+
+    def invert(self, y: torch.Tensor) -> torch.Tensor:
+        return torch.flip(y, dims=(self.dim,))
+
+
+@dataclass(frozen=True)
+class Rot90TTA(TTATransform):
+    k: int = 1
+    dims: tuple[int, int] = (-2, -1)
+
+    def apply(self, x: torch.Tensor) -> torch.Tensor:
+        return torch.rot90(x, k=int(self.k), dims=self.dims)
+
+    def invert(self, y: torch.Tensor) -> torch.Tensor:
+        return torch.rot90(y, k=-int(self.k), dims=self.dims)
+
+
+@dataclass(frozen=True)
 class ZoomOutTTA(TTATransform):
     scale: float = 0.9
     pad_mode: str = "reflect"
@@ -63,6 +86,43 @@ class ZoomOutTTA(TTATransform):
         pad_left = (w - new_w) // 2
         cropped = y[..., pad_top : pad_top + new_h, pad_left : pad_left + new_w]
         return F.interpolate(cropped, size=(h, w), mode="bilinear", align_corners=False)
+
+
+@dataclass(frozen=True)
+class ZoomInTTA(TTATransform):
+    """
+    Center crop + resize back (a "crop TTA").
+
+    `invert()` places the resized prediction back into the center and fills the outside with zeros.
+    """
+
+    scale: float = 1.1
+
+    def apply(self, x: torch.Tensor) -> torch.Tensor:
+        b, c, h, w = x.shape
+        scale = float(self.scale)
+        if scale <= 1.0:
+            return x
+        crop_h = max(1, int(round(h / scale)))
+        crop_w = max(1, int(round(w / scale)))
+        top = (h - crop_h) // 2
+        left = (w - crop_w) // 2
+        x_crop = x[..., top : top + crop_h, left : left + crop_w]
+        return F.interpolate(x_crop, size=(h, w), mode="bilinear", align_corners=False)
+
+    def invert(self, y: torch.Tensor) -> torch.Tensor:
+        b, c, h, w = y.shape
+        scale = float(self.scale)
+        if scale <= 1.0:
+            return y
+        crop_h = max(1, int(round(h / scale)))
+        crop_w = max(1, int(round(w / scale)))
+        top = (h - crop_h) // 2
+        left = (w - crop_w) // 2
+        y_small = F.interpolate(y, size=(crop_h, crop_w), mode="bilinear", align_corners=False)
+        out = torch.zeros_like(y)
+        out[..., top : top + crop_h, left : left + crop_w] = y_small
+        return out
 
 
 @torch.no_grad()

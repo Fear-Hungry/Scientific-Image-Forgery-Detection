@@ -21,7 +21,7 @@ from ..postprocess import PostprocessParams
 from ..typing import Case, Pathish, Split
 from .callbacks import Callback, CSVLoggerCallback, JSONLoggerCallback
 from .eval_of1 import evaluate_of1
-from .utils import fold_out_path, seed_everything, stratified_splits
+from .utils import apply_cutmix, fold_out_path, seed_everything, stratified_splits
 
 
 @dataclass(frozen=True)
@@ -314,6 +314,12 @@ class Trainer:
             for batch in train_loader:
                 x = batch.image.to(self.device)
                 y = batch.mask.to(self.device)
+                x, y = apply_cutmix(
+                    x,
+                    y,
+                    prob=float(self.config.train.cutmix_prob),
+                    alpha=float(self.config.train.cutmix_alpha),
+                )
                 logits = model(x)
                 loss = bce_dice_loss(logits, y)
                 opt.zero_grad(set_to_none=True)

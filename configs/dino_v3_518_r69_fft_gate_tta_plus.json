@@ -1,0 +1,70 @@
+{
+  "name": "v3_r69_518_fft_gate_tta_plus",
+  "model": {
+    "type": "dinov2",
+    "input_size": 518,
+    "encoder": {
+      "model_name": "vit_base_patch14_reg4_dinov2",
+      "checkpoint_path": null,
+      "pretrained": true
+    },
+    "checkpoint": "outputs/models/r69.pth",
+    "decoder_hidden_channels": 256,
+    "decoder_dropout": 0.0,
+    "freeze_encoder": true
+  },
+  "inference": {
+    "tta": {
+      "modes": ["identity", "hflip", "vflip", "zoom_out", "zoom_in"],
+      "zoom_scale": 0.9,
+      "zoom_in_scale": 1.1,
+      "weights": [0.3, 0.2, 0.2, 0.15, 0.15]
+    },
+    "postprocess": {
+      "prob_threshold": 0.5,
+      "gaussian_sigma": 0.75,
+      "sobel_weight": 0.1,
+      "open_kernel": 3,
+      "close_kernel": 5,
+      "min_area": 150,
+      "min_mean_conf": 0.18,
+      "min_prob_std": 0.25,
+      "small_area": 300,
+      "small_min_mean_conf": 0.85,
+      "authentic_area_max": 300,
+      "authentic_conf_max": 0.85
+    },
+    "fft_gate": {
+      "enabled": true,
+      "checkpoint": "outputs/models/fft_cls.pth",
+      "backbone": "resnet18",
+      "dropout": 0.0,
+      "threshold": 0.5,
+      "fft": {
+        "mode": "logmag",
+        "input_size": 256,
+        "hp_radius_fraction": 0.1,
+        "normalize_percentiles": [5.0, 95.0]
+      }
+    }
+  },
+  "train": {
+    "epochs": 5,
+    "batch_size": 4,
+    "lr": 0.001,
+    "weight_decay": 0.0001,
+    "num_workers": 2,
+    "val_fraction": 0.1,
+    "seed": 42,
+    "folds": 1,
+    "fold": -1,
+    "aug": "robust",
+    "cutmix_prob": 0.0,
+    "cutmix_alpha": 1.0,
+    "scheduler": "none",
+    "lr_min": 1e-6,
+    "max_lr": 0.0,
+    "pct_start": 0.1
+  }
+}
+

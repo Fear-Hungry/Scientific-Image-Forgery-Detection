@@ -24,6 +24,25 @@ def _safe_gauss_noise(*, A, p: float):
     return A.GaussNoise(p=float(p))
 
 
+def _safe_image_compression(*, A, p: float):
+    """
+    JPEG/WebP compression artifacts (JPEG by default).
+
+    Albumentations 2.x: ImageCompression(compression_type='jpeg', quality_range=(q0, q1))
+    Albumentations 1.x: ImageCompression(quality_lower=..., quality_upper=...)
+    """
+    if hasattr(A, "ImageCompression"):
+        params = inspect.signature(A.ImageCompression).parameters
+        if "quality_range" in params:
+            return A.ImageCompression(compression_type="jpeg", quality_range=(30, 95), p=float(p))
+        if "quality_lower" in params and "quality_upper" in params:
+            return A.ImageCompression(quality_lower=30, quality_upper=95, p=float(p))
+        return A.ImageCompression(p=float(p))
+    if hasattr(A, "JpegCompression"):
+        return A.JpegCompression(quality_lower=30, quality_upper=95, p=float(p))
+    return None
+
+
 def make_transforms(input_size: int, *, train: bool, aug: AugMode) -> TransformFn:
     """
     Albumentations pipeline for (image, mask).
@@ -57,6 +76,7 @@ def make_transforms(input_size: int, *, train: bool, aug: AugMode) -> TransformF
         if aug == "robust":
             base.extend(
                 [
+                    A.RandomRotate90(p=0.2),
                     # Albumentations 2.x warns that ShiftScaleRotate is a special case of Affine.
                     # Keep compatibility with older versions by falling back when needed.
                     (
@@ -86,6 +106,9 @@ def make_transforms(input_size: int, *, train: bool, aug: AugMode) -> TransformF
                     _safe_gauss_noise(A=A, p=0.2),
                 ]
             )
+            comp = _safe_image_compression(A=A, p=0.2)
+            if comp is not None:
+                base.append(comp)
 
     aug_tf = A.Compose(base)
 

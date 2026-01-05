@@ -12,7 +12,7 @@ from .checkpoint import load_flexible_state_dict, warn_state_dict
 from .config import SegmentationModelConfig, load_segmentation_config
 from .fft_gate import FFTGate
 from .image import LetterboxMeta, letterbox_reflect, unletterbox
-from .inference import TilingParams, default_tta, load_rgb, predict_prob_map_tiled
+from .inference import TilingParams, build_tta, load_rgb, predict_prob_map_tiled
 from .models.dinov2_decoder import DinoV2EncoderSpec, DinoV2SegmentationModel
 from .models.dinov2_freq_fusion import DinoV2FreqFusionSegmentationModel, FreqFusionSpec
 from .models.dinov2_multiscale import DinoV2MultiScaleSegmentationModel, MultiScaleSpec
@@ -110,9 +110,11 @@ class InferenceEngine:
         model = _load_segmentation_model(cfg.model, device=device, path_roots=path_roots)
 
         post = PostprocessParams(**dataclasses.asdict(cfg.inference.postprocess))
-        tta_transforms, tta_weights = default_tta(
+        tta_transforms, tta_weights = build_tta(
+            modes=cfg.inference.tta.modes,
             zoom_scale=float(cfg.inference.tta.zoom_scale),
-            weights=tuple(cfg.inference.tta.weights),
+            zoom_in_scale=float(cfg.inference.tta.zoom_in_scale),
+            weights=list(cfg.inference.tta.weights),
         )
 
         tiling = None

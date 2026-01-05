@@ -63,12 +63,12 @@ Usada por:
 - `model.checkpoint`: checkpoint do modelo completo (usado na inferência)
 - `model.encoder.*`: especificação do encoder DINOv2 (timm)
 - `model.multiscale.*`: extração multi-camada (somente em `dinov2_multiscale`)
-- `inference.tta.*`: TTA (por padrão: identidade + flip + zoom-out)
+- `inference.tta.*`: TTA (por padrão: identidade + flip + zoom-out; pode customizar `modes`)
 - `inference.batch_size`: batch de imagens (quando `tiling` está desligado)
 - `inference.tiling.*`: *tiled inference* (opcional; use quando imagem é grande)
 - `inference.postprocess.*`: threshold/filtros/regras para decidir `authentic` e instâncias
 - `inference.fft_gate.*`: classificador FFT opcional para revisar casos `authentic`
-- `train.*`: defaults de treino (podem ser sobrescritos no CLI)
+- `train.*`: defaults de treino (podem ser sobrescritos no CLI; inclui CutMix opcional)
 
 ### `inference.postprocess` (documentação rápida)
 
@@ -104,6 +104,14 @@ Observações:
 - `fuse`: `"concat"` (padrão) ou `"sum"`.
 - `decoder_depth`: profundidade do head CNN após fusão (>= 1).
 
+### `inference.tta` (TTA)
+
+- `modes` (opcional): lista de modos. Se não definido, usa o default legado: `["identity","hflip","zoom_out"]`.
+  - suportados: `identity`, `hflip`, `vflip`, `zoom_out`, `zoom_in`, `rot90`, `rot180`, `rot270`
+- `zoom_scale`: escala do `zoom_out`.
+- `zoom_in_scale`: escala do `zoom_in` (crop central + resize).
+- `weights`: pesos por modo (se o tamanho não bater com `modes`, usa pesos iguais).
+
 ## 2) Config do classificador FFT
 
 Usada por:
@@ -134,6 +142,8 @@ Exemplos:
   - `python scripts/predict_submission.py --config configs/dino_v3_518_r69.json --data-root data/recodai --out outputs/sub.csv --set inference.postprocess.min_area=200`
 - Rodar treino com k-fold e scheduler:
   - `python scripts/train_dino_decoder.py --config configs/dino_v3_518_r69.json --data-root data/recodai --out outputs/models/r69.pth --set train.folds=5 --set train.scheduler=cosine`
+- Ativar CutMix no treino (mais agressivo; pode ajudar recall):
+  - `python scripts/train_dino_decoder.py --config configs/dino_v3_518_r69.json --data-root data/recodai --out outputs/models/r69.pth --set train.cutmix_prob=0.5 --set train.cutmix_alpha=1.0`
 
 Valores são parseados como JSON quando possível (`true/false`, números, listas).
 

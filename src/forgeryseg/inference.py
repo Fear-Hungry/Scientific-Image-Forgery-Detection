@@ -10,7 +10,7 @@ from PIL import Image
 from .image import LetterboxMeta, letterbox_reflect, unletterbox
 from .postprocess import PostprocessParams, postprocess_prob
 from .rle import masks_to_annotation
-from .tta import HFlipTTA, IdentityTTA, TTATransform, ZoomOutTTA, predict_with_tta
+from .tta import HFlipTTA, IdentityTTA, Rot90TTA, TTATransform, VFlipTTA, ZoomInTTA, ZoomOutTTA, predict_with_tta
 
 
 def load_rgb(path: str | Path) -> np.ndarray:
@@ -173,13 +173,71 @@ def predict_prob_map_tiled(
     return prob_sum / np.maximum(w_sum, 1e-6)
 
 
+def build_tta(
+    *,
+    modes: list[str] | None = None,
+    zoom_scale: float = 0.9,
+    zoom_in_scale: float = 1.1,
+    weights: list[float] | None = None,
+) -> tuple[list[TTATransform], list[float]]:
+    """
+    Build a list of TTA transforms and weights.
+
+    `modes` supports:
+      - identity
+      - hflip
+      - vflip
+      - zoom_out
+      - zoom_in
+      - rot90 / rot180 / rot270
+
+    If `modes=None`, keeps the legacy default: identity + hflip + zoom_out.
+    """
+    if modes is None:
+        transforms: list[TTATransform] = [IdentityTTA(), HFlipTTA(), ZoomOutTTA(scale=float(zoom_scale))]
+        default_w = [0.5, 0.25, 0.25]
+        w = default_w if weights is None else list(weights)
+        if len(w) != len(transforms):
+            w = [1.0] * len(transforms)
+        return transforms, w
+
+    xs = [str(m).strip().lower() for m in modes if str(m).strip()]
+    transforms = []
+    for m in xs:
+        if m == "identity":
+            transforms.append(IdentityTTA())
+        elif m == "hflip":
+            transforms.append(HFlipTTA())
+        elif m == "vflip":
+            transforms.append(VFlipTTA())
+        elif m == "zoom_out":
+            transforms.append(ZoomOutTTA(scale=float(zoom_scale)))
+        elif m == "zoom_in":
+            transforms.append(ZoomInTTA(scale=float(zoom_in_scale)))
+        elif m == "rot90":
+            transforms.append(Rot90TTA(k=1))
+        elif m == "rot180":
+            transforms.append(Rot90TTA(k=2))
+        elif m == "rot270":
+            transforms.append(Rot90TTA(k=3))
+        else:
+            raise ValueError(f"Unknown TTA mode: {m!r}")
+
+    if not transforms:
+        transforms = [IdentityTTA()]
+
+    w = [1.0] * len(transforms) if weights is None else list(weights)
+    if len(w) != len(transforms):
+        w = [1.0] * len(transforms)
+    return transforms, w
+
+
 def default_tta(
     *,
     zoom_scale: float = 0.9,
     weights: tuple[float, float, float] = (0.5, 0.25, 0.25),
 ) -> tuple[list[TTATransform], list[float]]:
-    transforms: list[TTATransform] = [IdentityTTA(), HFlipTTA(), ZoomOutTTA(scale=float(zoom_scale))]
-    return transforms, list(weights)
+    return build_tta(modes=None, zoom_scale=float(zoom_scale), weights=list(weights))
 
 
 def predict_annotation(

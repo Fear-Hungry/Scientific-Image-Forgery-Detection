@@ -135,6 +135,29 @@ EVAL_SPLIT = "train"  # train | supplemental
 EVAL_LIMIT = 0  # 0 = sem limite (usa tudo)
 EVAL_CONFIG = CONFIG_ROOT / "dino_v3_518_r69_fft_gate_tta_plus.json"  # TTA mais forte (h/vflip + zoom in/out)
 
+# -------------------------
+# Sanity-check (evitar under/overfitting)
+# -------------------------
+#
+# Objetivo: detectar cedo problemas clássicos (máscara errada, pipeline desalinhado, LR absurda,
+# modelo "não aprende") antes de gastar muito tempo de GPU.
+RUN_SANITY = True
+SANITY_SPLIT = "train"  # train | supplemental
+SANITY_N_SAMPLES = 24  # total (mistura forged + authentic, estratificado)
+SANITY_VAL_FRACTION = 0.25
+SANITY_SEED = 42
+
+# Overfit test (mini-set): deve melhorar bastante em poucos passos
+SANITY_OVERFIT_TEST = True
+SANITY_TRAIN_STEPS = 80  # ~50–150 já costuma bastar para detectar bug
+SANITY_BATCH = 4
+SANITY_LR = 3e-3
+SANITY_WEIGHT_DECAY = 0.0
+SANITY_FREEZE_ENCODER = True  # deixe True para refletir o treino real; False overfita mais fácil (mais lento)
+
+# Postprocess "relaxado" só para medir tendência (não é tuning final!)
+SANITY_PROB_THRESHOLD = 0.30
+
 # (Opcional) tunar pós-processamento (rápido) num subset de validação.
 #
 # Meta: aumentar mean_forged (e reduzir forg_pred_as_auth) sem destruir mean_authentic.
@@ -208,6 +231,204 @@ device = torch.device(device_str)
 print(f"device={device} (Dica: ative GPU em Settings -> Accelerator)")
 
 OUT_MODELS.mkdir(parents=True, exist_ok=True)
+
+# %%
+# -------------------------
+# Sanity-check (data + mini overfit)
+# -------------------------
+
+if RUN_SANITY:
+    import dataclasses
+
+    import numpy as np
+    from torch.utils.data import DataLoader, Subset
+
+    from forgeryseg.config import load_segmentation_config
+    from forgeryseg.dataset import RecodaiDataset
+    from forgeryseg.losses import bce_dice_loss
+    from forgeryseg.postprocess import PostprocessParams
+    from forgeryseg.training.eval_of1 import evaluate_of1
+    from forgeryseg.training.trainer import _build_model
+    from forgeryseg.training.utils import seed_everything, stratified_splits
+    from forgeryseg.transforms import make_transforms
+
+    print("\n[sanity] --- dataset quick stats ---")
+    seed_everything(int(SANITY_SEED))
+
+    # Load a dataset with deterministic transforms (resize+pad only) for sanity checks.
+    cfg_sanity = load_segmentation_config(SEG_TRAIN_CONFIG)
+    cfg_sanity.model.freeze_encoder = bool(SANITY_FREEZE_ENCODER)
+
+    tf_sanity = make_transforms(int(cfg_sanity.model.input_size), train=True, aug="none")
+    ds = RecodaiDataset(
+        data_root,
+        SANITY_SPLIT,  # type: ignore[arg-type]
+        training=True,
+        include_authentic=True,
+        include_forged=True,
+        transforms=tf_sanity,
+        cache_images=True,
+        cache_masks=True,
+    )
+
+    n_total = len(ds)
+    n_forg = sum(1 for c in ds.cases if c.mask_path is not None)
+    n_auth = n_total - n_forg
+    print(f"[sanity] split={SANITY_SPLIT} n={n_total} forged={n_forg} authentic={n_auth}")
+    if n_total == 0 or n_forg == 0 or n_auth == 0:
+        raise RuntimeError("[sanity] split sem exemplos suficientes (precisa forged+authentic).")
+
+    # Pick a small stratified subset.
+    idx_auth = [i for i, c in enumerate(ds.cases) if c.mask_path is None]
+    idx_forg = [i for i, c in enumerate(ds.cases) if c.mask_path is not None]
+    p_forg = len(idx_forg) / max(1, n_total)
+    n_forg_s = int(round(int(SANITY_N_SAMPLES) * p_forg))
+    n_forg_s = int(np.clip(n_forg_s, 1, len(idx_forg)))
+    n_auth_s = int(np.clip(int(SANITY_N_SAMPLES) - n_forg_s, 1, len(idx_auth)))
+
+    rng = np.random.default_rng(int(SANITY_SEED))
+    chosen = rng.choice(idx_auth, size=n_auth_s, replace=False).tolist() + rng.choice(idx_forg, size=n_forg_s, replace=False).tolist()
+    rng.shuffle(chosen)
+
+    labels = np.asarray([1 if ds.cases[i].mask_path is not None else 0 for i in chosen], dtype=np.int64)
+    splits = stratified_splits(labels, folds=1, val_fraction=float(SANITY_VAL_FRACTION), seed=int(SANITY_SEED))
+    _, tr_sub, va_sub = splits[0]
+    train_idx = [chosen[int(i)] for i in tr_sub.tolist()]
+    val_idx = [chosen[int(i)] for i in va_sub.tolist()]
+
+    def _sample_stats(ix: int) -> None:
+        s = ds[int(ix)]
+        x = s.image
+        y = s.mask
+        uniq = torch.unique(y).detach().cpu().numpy().tolist()
+        print(
+            f"[sanity] sample case_id={s.case_id} x={tuple(x.shape)} x_minmax=({float(x.min()):.3f},{float(x.max()):.3f}) "
+            f"y_sum={float(y.sum()):.0f} y_unique={uniq}"
+        )
+
+    print("[sanity] sample inspection:")
+    for ix in train_idx[:2] + val_idx[:2]:
+        _sample_stats(ix)
+
+    # Build model and run a quick forward/backward to catch shape/device issues.
+    model = _build_model(cfg_sanity).to(device)
+    model.train()
+    loader = DataLoader(Subset(ds, train_idx), batch_size=int(max(1, SANITY_BATCH)), shuffle=True, num_workers=0)
+    batch0 = next(iter(loader))
+    x0 = batch0.image.to(device)
+    y0 = batch0.mask.to(device)
+    with torch.no_grad():
+        logits0 = model(x0)
+    print(f"[sanity] forward ok: logits={tuple(logits0.shape)}")
+
+    if SANITY_OVERFIT_TEST:
+        print("\n[sanity] --- mini overfit test ---")
+        post_relaxed = PostprocessParams(
+            prob_threshold=float(SANITY_PROB_THRESHOLD),
+            min_area=0,
+            min_mean_conf=0.0,
+            min_prob_std=0.0,
+        )
+
+        train_cases = [ds.cases[i] for i in train_idx]
+        val_cases = [ds.cases[i] for i in val_idx]
+
+        with torch.no_grad():
+            before_train = evaluate_of1(
+                model,
+                train_cases,
+                device=device,
+                input_size=int(cfg_sanity.model.input_size),
+                postprocess=post_relaxed,
+                use_tta=False,
+                progress=False,
+            )
+            before_val = evaluate_of1(
+                model,
+                val_cases,
+                device=device,
+                input_size=int(cfg_sanity.model.input_size),
+                postprocess=post_relaxed,
+                use_tta=False,
+                progress=False,
+            )
+
+        opt = torch.optim.AdamW(
+            model.parameters(),
+            lr=float(SANITY_LR),
+            weight_decay=float(SANITY_WEIGHT_DECAY),
+        )
+
+        losses = []
+        steps = int(max(1, SANITY_TRAIN_STEPS))
+        it = iter(loader)
+        for step in range(1, steps + 1):
+            try:
+                batch = next(it)
+            except StopIteration:
+                it = iter(loader)
+                batch = next(it)
+            x = batch.image.to(device)
+            y = batch.mask.to(device)
+            logits = model(x)
+            loss = bce_dice_loss(logits, y)
+            opt.zero_grad(set_to_none=True)
+            loss.backward()
+            opt.step()
+            losses.append(float(loss.detach().cpu().item()))
+            if step % 20 == 0 or step == 1:
+                print(f"[sanity] step={step}/{steps} loss={losses[-1]:.6f}")
+
+        with torch.no_grad():
+            after_train = evaluate_of1(
+                model,
+                train_cases,
+                device=device,
+                input_size=int(cfg_sanity.model.input_size),
+                postprocess=post_relaxed,
+                use_tta=False,
+                progress=False,
+            )
+            after_val = evaluate_of1(
+                model,
+                val_cases,
+                device=device,
+                input_size=int(cfg_sanity.model.input_size),
+                postprocess=post_relaxed,
+                use_tta=False,
+                progress=False,
+            )
+
+        def _loss_mean(xs: list[float], n: int) -> float:
+            if not xs:
+                return 0.0
+            n = int(min(len(xs), max(1, n)))
+            return float(np.mean(xs[:n]))
+
+        l0 = _loss_mean(losses, 5)
+        l1 = float(np.mean(losses[-5:])) if len(losses) >= 5 else float(np.mean(losses))
+        print(
+            "\n[sanity] results (relaxed postprocess):\n"
+            f"  loss: first5={l0:.4f} last5={l1:.4f}\n"
+            f"  train oF1: before={before_train.mean_of1:.4f} after={after_train.mean_of1:.4f}\n"
+            f"  val   oF1: before={before_val.mean_of1:.4f} after={after_val.mean_of1:.4f}\n"
+        )
+
+        # Heurísticas simples para guiar decisão (não bloqueia o notebook).
+        if after_train.mean_of1 < 0.20 and l1 >= (0.95 * l0):
+            print(
+                "[sanity][warn] Parece UNDERFIT/bug: não melhorou no mini-set.\n"
+                "- cheque masks (0/1), alinhamento img↔mask, normalização, LR.\n"
+                "- tente SANITY_FREEZE_ENCODER=False ou aumente SANITY_TRAIN_STEPS.\n"
+            )
+        elif after_train.mean_of1 > 0.70 and after_val.mean_of1 < 0.20:
+            print(
+                "[sanity][warn] Parece OVERFIT forte no mini-set.\n"
+                "- aumente aug (SEG_AUG=robust), use CutMix (SEG_CUTMIX_PROB>0), weight_decay.\n"
+                "- use k-fold e early stopping por val_of1.\n"
+            )
+        else:
+            print("[sanity] OK: pipeline parece aprender (seguindo para treino completo).")
 
 # %%
 # -----
